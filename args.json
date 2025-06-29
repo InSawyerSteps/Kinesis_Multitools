@@ -1,0 +1,6 @@
+{
+  "project_name": "RAG_MVP_Resumes",
+  "intake_folder": "C:\\Projects\\MCP Server\\rag_recruiting_mvp\\data\\resumes",
+  "chunk_size": 500,
+  "chunk_overlap": 50
+}

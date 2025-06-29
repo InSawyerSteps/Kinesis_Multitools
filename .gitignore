@@ -1,0 +1,35 @@
+# Python virtual environment
+.venv
+venv
+
+# Python cache files
+__pycache__
+.py[cod]
+$py.class
+
+# ChromaDB data
+chroma_db_data
+
+# Distribution  packaging
+dist
+build
+.egg-info
+
+# IDE specific files
+.vscode
+.idea
+.swp
+.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+
+#rag_recruiting_mvp
+rag_recruiting_mvp/data
+rag_recruiting_mvp/chroma_db_data_recruiting
+rag_recruiting_mvp/logs
+rag_recruiting_mvp/depe

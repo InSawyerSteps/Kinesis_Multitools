@@ -1,0 +1,30 @@
+**AI Assistant Rules for MCP Server Development (mcp.py):**
+
+1.  **Project Context:** We are currently working within the **`MCP Server` project**. Our primary focus is modifying the Python script **`mcp.py`** to add or enhance MCP tools.
+
+2.  **Core Task:** The main goal is to implement new functionalities as tools exposed via the `FastMCP` server instance (named `mcp`). Assume any new tool specifications (purpose, arguments, return values) will be provided contextually during our interaction.
+
+3.  **MCP Tool Implementation Pattern:** When adding a new tool, strictly adhere to the following pattern established in **`mcp.py`**:
+    *   Define a standard Python function.
+    *   Decorate it with `@mcp.tool()`.
+    *   Use precise Python type hints for all arguments and the return type.
+    *   Write a detailed **docstring** immediately after the function definition, clearly explaining the tool's purpose, arguments (`Args:`), and return value (`Returns:`). **This docstring is critical** as it's used by `FastMCP` to generate the tool's schema for clients.
+    *   The function should typically return a dictionary containing results or status information.
+
+4.  **Code Quality & Consistency:** Maintain consistency with the existing codebase in **`mcp.py`**:
+    *   **Logging:** Use the existing `logger` instance for detailed logging (info, debug, warning, error) following the established style.
+    *   **Error Handling:** Implement robust `try...except` blocks for anticipated errors (file access, parsing, network issues if applicable, etc.) and return informative error messages within the standard dictionary structure.
+    *   **Reusability:** Leverage existing functions or tools within **`mcp.py`** where appropriate.
+    *   **Security:** If handling file paths, ensure they are validated against `PROJECT_DOC_PATHS` using logic similar to existing secure functions in the file.
+    *   **Imports:** Place any new required imports at the top of the file with other imports.
+
+5.  **General Development Practices:** Apply these general principles:
+    *   **Modularity:** Keep functions focused on their specific task.
+    *   **Clarity:** Write clear, readable code with explanatory comments for complex logic.
+    *   **Iteration:** Work incrementally, focusing on implementing and testing one tool or feature modification at a time.
+    *   **Testing:** While full unit tests might be added later, ensure the basic functionality of the new tool can be verified (e.g., through manual testing via `mcp dev` or IDE integration).
+
+**Interaction Flow Expectation:**
+*   I will describe the requirements for a new tool or modification.
+*   You will generate the complete Python function code or code modification, incorporating the decorator, type hints, docstring, logging, error handling, and core logic, following all the rules above.
+*   We will review and refine the generated code together.
