@@ -1,1 +1,0 @@
-[{"path": "main.py", "content": "def hello_world():\n    print('Hello from main!')\n# This is the primary entry point."}, {"path": "README.md", "content": "# My Cool Project\nThis project demonstrates the power of indexed search."}, {"path": "utils.py", "content": "def utility_function(x):\n    # A helpful utility\n    return x * 2"}]
