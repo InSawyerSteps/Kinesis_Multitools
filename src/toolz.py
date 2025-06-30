@@ -58,8 +58,8 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp_search_tools")
 
-mcp = FastMCP(
-    name="Project Search & Index",
+kinesis_mcp = FastMCP(
+    name="Kinesis_Multitools",
 )
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ mcp = FastMCP(
 # Assumes this file is in 'src/' and the project root is its parent's parent.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_ROOTS: Dict[str, pathlib.Path] = {
-    "MCP-Server": PROJECT_ROOT,
+    "Kinesis_Multitools": PROJECT_ROOT,
 }
 INDEX_DIR_NAME = ".windsurf_search_index"
 
