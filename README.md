@@ -36,7 +36,21 @@ The server will start on `http://localhost:8000`.
 
 ### Indexing the Project
 
-Before using semantic search, index your project:
+Several of the `/search` subtools rely on a FAISS vector index generated from
+your source files.  This index is stored in a hidden folder named
+`.windsurf_search_index` inside the project root.  If the index does not exist,
+embedding‑based modes such as `semantic`, `similarity` and `task_verification`
+return an error:
+
+```
+Index not found for project. Please run 'index_project_files' first.
+```
+
+Run the indexing tool whenever you update your code so that these subtools have
+up‑to‑date embeddings.  Indexing is incremental and will only reprocess files
+that changed.
+
+Start by indexing your project:
 
 ```http
 POST http://localhost:8000/index_project_files
