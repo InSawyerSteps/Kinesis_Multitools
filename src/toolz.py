@@ -135,7 +135,7 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # General-purpose Project Tools (migrated from toolz.py)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
     """
     Recursively list files for a given project.
@@ -168,7 +168,7 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
         logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
     return results
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -210,7 +210,7 @@ def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Di
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> Dict:
     """
     Index the project for semantic search **incrementally**.
@@ -737,7 +737,7 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
-@mcp.tool(name="search")
+@kinesis_mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
     Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
@@ -799,4 +799,4 @@ if __name__ == "__main__":
         logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")
     else:
         logger.info("Starting Project Search & Index MCP Server...")
-        mcp.run()
+        kinesis_mcp.run()
