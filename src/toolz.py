@@ -107,7 +107,8 @@ try:
         print(f"Radon version: {getattr(radon, '__version__', 'unknown')}")
         # Try importing specific modules
         from radon.cli.harvest import CCHarvester
-        from radon.cli.config import Config
+        # Radon 6.x defines Config inside radon.cli.__init__, not radon.cli.config
+        from radon.cli import Config
         print("Radon CLI modules imported successfully")
         RADON_AVAILABLE = True
     except Exception as e:
