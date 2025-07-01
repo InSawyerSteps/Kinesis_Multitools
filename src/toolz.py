@@ -1,16 +1,59 @@
 """
-MCP Server with a consolidated, multi-modal search tool.
+MCP Server with a consolidated, multi-modal search tool."""
 
-This module provides two primary tools for an AI agent:
-  - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
-  - search: A powerful "multitool" that provides multiple modes of searching:
-    - 'keyword': Literal text search.
-    - 'semantic': Natural language concept search using the vector index.
-    - 'ast': Structural search for definitions (functions, classes).
-    - 'references': Finds all usages of a symbol.
-    - 'similarity': Finds code blocks semantically similar to a given snippet.
-    - 'task_verification': A meta-search to check the implementation status of a task.
-"""
+# --- DEBUG: Enhanced Python Environment Info ---
+import sys
+import os
+import importlib
+import pkgutil
+import site
+
+print("\n=== DEBUG: Python Environment ===")
+print(f"Python Executable: {sys.executable}")
+print(f"Python Version: {sys.version}")
+print(f"Virtual Env: {os.environ.get('VIRTUAL_ENV', 'Not in virtual environment')}")
+print("\n=== sys.path ===")
+for p in sys.path:
+    print(f" - {p}")
+
+print("\n=== Installed Packages ===")
+for m in sorted(sys.modules.keys()):
+    if m.startswith('radon') or m.startswith('_radon') or m in ('mcp', 'fastmcp'):
+        try:
+            mod = sys.modules[m]
+            print(f"{m}: {getattr(mod, '__file__', 'no __file__')}")
+        except Exception as e:
+            print(f"{m}: Error accessing - {str(e)}")
+
+# --- SUPPRESS ALL WARNINGS AND NOISY STARTUP MESSAGES (for Windsurf handshake) ---
+import warnings
+warnings.filterwarnings("ignore")  # Ignore all warnings (Deprecation, User, etc.)
+import os
+os.environ["PYTHONWARNINGS"] = "ignore"
+# Suppress numpy warnings and info
+try:
+    import numpy as _np
+    _np.warnings.filterwarnings("ignore")
+    _np.seterr(all="ignore")
+except Exception:
+    pass
+# Silence bandit warnings if possible
+try:
+    import logging as _logging
+    _logging.getLogger("bandit").setLevel(_logging.ERROR)
+except Exception:
+    pass
+
+# This module provides two primary tools for an AI agent:
+#   - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
+#   - search: A powerful "multitool" that provides multiple modes of searching:
+#     - 'keyword': Literal text search.
+#     - 'semantic': Natural language concept search using the vector index.
+#     - 'ast': Structural search for definitions (functions, classes).
+#     - 'references': Finds all usages of a symbol.
+#     - 'similarity': Finds code blocks semantically similar to a given snippet.
+#     - 'task_verification': A meta-search to check the implementation status of a task.
+
 import ast
 import json
 import logging
@@ -18,7 +61,8 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set
+import uvicorn
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -51,11 +95,56 @@ except ImportError:
     Vulture = None
 
 try:
-    from radon.cli import cc_visit
-    from radon.cli.tools import CCHarvestor
-except ImportError:
-    cc_visit = None
-    CCHarvestor = None
+    print("\n=== DEBUG: Attempting to import radon ===")
+    print("Searching for radon in:")
+    for finder, name, _ in pkgutil.iter_modules():
+        if 'radon' in name:
+            print(f" - Found: {name} at {getattr(finder, 'path', 'unknown path')}")
+    # Try importing with debug info
+    try:
+        import radon
+        print(f"Radon imported successfully from: {radon.__file__}")
+        print(f"Radon version: {getattr(radon, '__version__', 'unknown')}")
+        # Try importing specific modules
+        from radon.cli.harvest import CCHarvester
+        from radon.cli.config import Config
+        print("Radon CLI modules imported successfully")
+        RADON_AVAILABLE = True
+    except Exception as e:
+        print(f"Radon import failed: {type(e).__name__}: {str(e)}")
+        print("Available modules in radon package:")
+        if 'radon' in sys.modules:
+            radon_path = os.path.dirname(sys.modules['radon'].__file__)
+            for item in os.listdir(radon_path):
+                if item.endswith('.py') and not item.startswith('_'):
+                    print(f" - {item}")
+        RADON_AVAILABLE = False
+        CCHarvester = None
+        Config = None
+        # Do not raise here, just mark as unavailable
+except Exception as e:
+    print(f"[DEBUG] Error in radon debug import block: {e}")
+    RADON_AVAILABLE = False
+    CCHarvester = None
+    Config = None
+    # Do not raise here, just mark as unavailable
+    print("\n=== RADON IMPORT FAILED ===")
+    print("Error: ")
+    print("This suggests either:")
+    print("1. Radon is not installed in the current environment")
+    print("2. The installation is corrupted")
+    print("3. There's a version mismatch")
+    print("\nTo fix this, try:")
+    print("1. pip uninstall -y radon")
+    print("2. pip install --no-cache-dir radon==6.0.1")
+    print("3. Verify with: python -c 'import radon; print(radon.__file__)'")
+    print("\nCurrent Python environment:")
+    print(f"  - Executable: {sys.executable}")
+    print(f"  - Path: {sys.path}")
+    
+    CCHarvester = None
+    Config = None
+    RADON_AVAILABLE = False
 
 try:
     import libcst as cst
@@ -117,9 +206,21 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp_search_tools")
 
-kinesis_mcp = FastMCP(
-    name="Kinesis_Multitools",
+logger.info("[MCP SERVER IMPORT] Importing src/toolz.py and initializing FastMCP instance...")
+mcp = FastMCP(
+    name="MCP-Server",
 )
+
+@mcp.tool()
+def ping() -> dict:
+    """
+    Simple ping tool for MCP registration test.
+
+    Returns:
+        dict: {"status": "pong"}
+    """
+    logger.info("[MCP TOOL] ping called.")
+    return {"status": "pong"}
 
 # ---------------------------------------------------------------------------
 # Project root configuration
@@ -127,7 +228,7 @@ kinesis_mcp = FastMCP(
 # Assumes this file is in 'src/' and the project root is its parent's parent.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_ROOTS: Dict[str, pathlib.Path] = {
-    "Kinesis_Multitools": PROJECT_ROOT,
+    "MCP-Server": PROJECT_ROOT,
 }
 INDEX_DIR_NAME = ".windsurf_search_index"
 
@@ -194,7 +295,7 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # General-purpose Project Tools (migrated from toolz.py)
 # ---------------------------------------------------------------------------
 
-@kinesis_mcp.tool()
+@mcp.tool()
 def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
     """
     Recursively list files for a given project.
@@ -227,7 +328,7 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
         logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
     return results
 
-@kinesis_mcp.tool()
+@mcp.tool()
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -269,7 +370,7 @@ def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Di
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@kinesis_mcp.tool()
+@mcp.tool()
 def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> Dict:
     """
     Index the project for semantic search **incrementally**.
@@ -796,7 +897,7 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
-@kinesis_mcp.tool(name="search")
+@mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
     Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
@@ -859,7 +960,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # Tool 3: The /analyze Multitool
 # ---------------------------------------------------------------------------
-@kinesis_mcp.tool()
+@mcp.tool()
 def analyze(request: AnalysisRequest) -> dict:
     """
     Run static analyses on files or directories (quality, types, security, dead code, complexity, TODOs).
@@ -954,22 +1055,19 @@ def analyze(request: AnalysisRequest) -> dict:
                     except Exception as e:
                         results["dead_code"] = f"vulture error: {e}"
             elif analysis == "complexity":
-                if cc_visit is None:
+                if not RADON_AVAILABLE:
                     results["complexity"] = "radon not installed"
                 else:
-                    logger.info(f"[analyze] Running radon on {path}")
                     try:
-                        if sys.platform == 'win32':
-                            radon_exec = 'radon.exe'
-                        else:
-                            radon_exec = 'radon'
-                        radon_path = os.path.join(os.path.dirname(sys.executable), radon_exec)
-                        logger.info(f"[analyze] Using radon at: {radon_path}")
-                        cc_results = subprocess.run([
-                            radon_path, 'cc', str(path)
-                        ], capture_output=True, text=True, timeout=60)
-                        results["complexity"] = cc_results.stdout
+                        logger.info(f"[analyze] Running radon cyclomatic complexity on {request.path}")
+                        config = Config()
+                        harvester = CCHarvester(config, [request.path])
+                        complexity_results = harvester.results
+                        # Optionally filter by rank here if needed
+                        results["complexity"] = complexity_results
                     except Exception as e:
+                        logger.error(f"[analyze] radon error: {e}")
+                        results["complexity"] = f"radon error: {e}"
                         results["complexity"] = f"radon error: {e}"
             elif analysis == "todos":
                 logger.info(f"[analyze] Scanning for TODOs in {path}")
@@ -1005,7 +1103,7 @@ def analyze(request: AnalysisRequest) -> dict:
 # ---------------------------------------------------------------------------
 # Tool 4: The /edit Multitool
 # ---------------------------------------------------------------------------
-@kinesis_mcp.tool()
+@mcp.tool()
 def edit(request: BatchEditRequest) -> dict:
     """
     Perform batch code edits (replace, insert, delete, rename symbol, add docstring) with preview/diff support.
@@ -1122,5 +1220,5 @@ if __name__ == "__main__":
         logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
         logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")
     else:
-        logger.info("Starting Project Search & Index MCP Server...")
-        kinesis_mcp.run()
+        logger.info("Starting MCP Server...")
+        mcp.run(transport="sse", port=8000)
