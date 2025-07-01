@@ -899,7 +899,11 @@ def analyze(request: AnalysisRequest) -> dict:
                     try:
                         import sys
                         venv_scripts = os.path.dirname(sys.executable)
-                        pylint_path = os.path.join(venv_scripts, 'pylint.exe')
+                        if sys.platform == 'win32':
+                            pylint_exec = 'pylint.exe'
+                        else:
+                            pylint_exec = 'pylint'
+                        pylint_path = os.path.join(venv_scripts, pylint_exec)
                         logger.info(f"[analyze] Using pylint at: {pylint_path}")
                         pylint_output = subprocess.run([
                             pylint_path, str(path)
@@ -955,17 +959,16 @@ def analyze(request: AnalysisRequest) -> dict:
                 else:
                     logger.info(f"[analyze] Running radon on {path}")
                     try:
-                        cc_results = cc_visit([str(path)])
-                        # Radon returns blocks with attributes; convert to dicts
-                        results["complexity"] = [
-                            {
-                                "name": getattr(block, "name", None),
-                                "complexity": getattr(block, "complexity", None),
-                                "lineno": getattr(block, "lineno", None),
-                                "endline": getattr(block, "endline", None)
-                            }
-                            for block in cc_results
-                        ]
+                        if sys.platform == 'win32':
+                            radon_exec = 'radon.exe'
+                        else:
+                            radon_exec = 'radon'
+                        radon_path = os.path.join(os.path.dirname(sys.executable), radon_exec)
+                        logger.info(f"[analyze] Using radon at: {radon_path}")
+                        cc_results = subprocess.run([
+                            radon_path, 'cc', str(path)
+                        ], capture_output=True, text=True, timeout=60)
+                        results["complexity"] = cc_results.stdout
                     except Exception as e:
                         results["complexity"] = f"radon error: {e}"
             elif analysis == "todos":
@@ -986,12 +989,6 @@ def analyze(request: AnalysisRequest) -> dict:
                     results["todos"] = todos
                 except Exception as e:
                     results["todos"] = f"TODO scan error: {e}"
-            elif analysis == "audit_package_versions":
-                try:
-                    audit_req = AuditPackageVersionsRequest()
-                    results["audit_package_versions"] = audit_package_versions(audit_req)
-                except Exception as e:
-                    results["audit_package_versions"] = f"audit_package_versions error: {e}"
             elif analysis == "check_licenses":
                 try:
                     license_req = CheckLicensesRequest()
@@ -1069,15 +1066,14 @@ def edit(request: BatchEditRequest) -> dict:
         if any(op.operation in ("rename_symbol", "add_docstring") for op in request.edits):
             if not cst:
                 return {"status": "error", "message": "LibCST is not installed, cannot perform edits."}
+            # TODO: Replace with actual LibCST logic for code transformations
             class LibCSTEditor:
                 def __init__(self, code):
                     self.code = code
                 def rename(self, old, new):
-                    # Placeholder: actual LibCST logic should go here
-                    self.code = self.code.replace(old, new)
+                    raise NotImplementedError("LibCST-based rename not implemented yet.")
                 def add_docstring(self, node, doc):
-                    # Placeholder: actual LibCST logic should go here
-                    self.code = self.code  # No-op for now
+                    raise NotImplementedError("LibCST-based docstring insertion not implemented yet.")
             editor = LibCSTEditor(modified_content)
             for edit_op in request.edits:
                 if edit_op.operation == "rename_symbol":
