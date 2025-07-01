@@ -43,8 +43,11 @@ fastmcp==0.1.0
 faiss-cpu==1.11.0
 sentence-transformers==4.1.0
 jedi==0.19.2
-# torch GPU build (CUDA 12.1) must be installed from the custom index below
-# pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch (GPU, CUDA 12.1):
+# DO NOT install via requirements.txt alone.
+# Instead, run:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# The line below is for documentation/version tracking only.
 mdurl==0.1.2
 mmh3==5.1.0
 monotonic==1.6
