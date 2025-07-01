@@ -58,8 +58,8 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp_search_tools")
 
-mcp = FastMCP(
-    name="Project Search & Index",
+kinesis_mcp = FastMCP(
+    name="Kinesis_Multitools",
 )
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ mcp = FastMCP(
 # Assumes this file is in 'src/' and the project root is its parent's parent.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_ROOTS: Dict[str, pathlib.Path] = {
-    "MCP-Server": PROJECT_ROOT,
+    "Kinesis_Multitools": PROJECT_ROOT,
 }
 INDEX_DIR_NAME = ".windsurf_search_index"
 
@@ -135,7 +135,7 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # General-purpose Project Tools (migrated from toolz.py)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
     """
     Recursively list files for a given project.
@@ -168,7 +168,7 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
         logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
     return results
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -210,35 +210,58 @@ def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Di
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@kinesis_mcp.tool()
 def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> Dict:
     """
-    Index the project for semantic search. This tool scans source files, creates vector embeddings using sentence-transformers (with GPU acceleration if available), and builds a FAISS index for fast semantic/code search.
+    Index the project for semantic search **incrementally**.
+
+    This version detects file additions, modifications, and deletions so that we **avoid
+    recomputing embeddings for every chunk on every run**.  It works by:
+
+    1. Loading any existing FAISS index and accompanying ``metadata.json``.
+    2. Collecting current project files (respecting ignore-lists / size / extension filters).
+    3. Comparing each file's *mtime* and *size* against what was stored during the last
+       indexing pass.
+       * Unchanged  →  re-use the already-stored vectors (no embedding cost).
+       * Added / modified → re-chunk + embed just those files.
+       * Deleted → their vectors are dropped.
+    4. Re-building a **fresh** FAISS index from the union of reused + new vectors.  Using a
+       fresh index keeps the logic simple and avoids tricky in-place deletions while still
+       saving the heavy embedding cost.
+
+    NOTE: Each chunk entry in ``metadata.json`` now contains::
+
+        {
+          "path": "relative/path/to/file.py",
+          "content": "<chunk text>",
+          "vector": [..float32 list..],
+          "file_mtime": 1719690000.123,
+          "file_size": 2048
+        }
 
     Args:
-        project_name (str): Name of the project as defined in PROJECT_ROOTS (e.g., "MCP-Server").
+        project_name (str): Name of the project as defined in ``PROJECT_ROOTS``.
         subfolder (str, optional): If set, only index this subfolder within the project.
-        max_file_size_mb (int, optional): Maximum file size (in MB) to include (default: 5).
+        max_file_size_mb (int, optional): Maximum file size (in MB) to include (default ``5``).
 
     Returns:
         dict: {
-            'status': 'success'|'error',
+            'status': 'success' | 'error',
             'message': str,
-            'files_scanned_and_included': int,
+            'files_scanned_and_included': int,   # Total files considered this run
+            'unchanged_files': int,              # Re-used without re-embedding
+            'updated_files': int,                # Added or modified & re-embedded
+            'deleted_files': int,                # Removed from index
             'total_chunks_indexed': int,
             'indexing_duration_seconds': float
         }
-
-    Usage:
-        - Must be run before using 'semantic', 'similarity', or 'task_verification' search types.
-        - Skips .venv, dependency folders, and binary files automatically.
-        - Re-run if you add or change source files.
-        - For large projects, index a subfolder for faster results.
     """
     if not LIBS_AVAILABLE:
         return {"status": "error", "message": "Indexing failed: Required libraries (faiss, numpy, sentence-transformers) are not installed."}
 
-    # Configuration for intelligent file filtering
+    # ------------------------------------------------------------
+    # Config & Setup
+    # ------------------------------------------------------------
     directories_to_ignore = {
         'node_modules', '.git', '__pycache__', 'venv', '.venv', 'target',
         'build', 'dist', '.cache', '.idea', '.vscode', 'eggs', '.eggs'
@@ -250,86 +273,155 @@ def index_project_files(project_name: str, subfolder: Optional[str] = None, max_
     }
     max_file_size_bytes = max_file_size_mb * 1024 * 1024
 
+    CHUNK_SIZE = 512
+    CHUNK_OVERLAP = 64
+    BATCH_SIZE = 128
+
     start_time = time.monotonic()
+
     project_path = _get_project_path(project_name)
     if not project_path:
         return {"status": "error", "message": f"Project '{project_name}' not found."}
 
-    scan_path = project_path
-    if subfolder:
-        scan_path = project_path / subfolder
-        if not scan_path.is_dir():
-            return {"status": "error", "message": f"Subfolder '{subfolder}' not found in project."}
+    scan_path = project_path / subfolder if subfolder else project_path
+    if subfolder and not scan_path.is_dir():
+        return {"status": "error", "message": f"Subfolder '{subfolder}' not found in project."}
 
     index_path = scan_path / INDEX_DIR_NAME
     index_path.mkdir(exist_ok=True)
-    
-    logger.info(f"Starting intelligent indexing for project '{project_name}'...")
-    
-    # 1. Collect relevant files
-    relevant_files = [
+
+    # ------------------------------------------------------------
+    # Step 1.  Gather current relevant files
+    # ------------------------------------------------------------
+    relevant_files: list[pathlib.Path] = [
         p for p in scan_path.rglob('*') if p.is_file() and
         not any(ignored in p.parts for ignored in directories_to_ignore) and
         p.suffix.lower() in text_extensions_to_include and
         p.stat().st_size <= max_file_size_bytes and
         ".windsurf_search_index" not in str(p) and not str(p).endswith(".json")
     ]
+    logger.info("[index] Found %d relevant files to consider.", len(relevant_files))
 
-    if not relevant_files:
-        return {"status": "error", "message": "No relevant text files found to index."}
+    # ------------------------------------------------------------
+    # Step 2.  Load previous metadata (if any)
+    # ------------------------------------------------------------
+    old_metadata_file = index_path / "metadata.json"
+    old_metadata: list[dict] = []
+    if old_metadata_file.exists():
+        try:
+            with open(old_metadata_file, "r", encoding="utf-8") as f:
+                old_metadata = json.load(f)
+            logger.info("[index] Loaded previous metadata with %d chunks.", len(old_metadata))
+        except Exception as e:
+            logger.warning("[index] Failed to load existing metadata.json: %s. A full re-index will be performed.", e)
+            old_metadata = []
 
-    logger.info(f"Found {len(relevant_files)} relevant files to process.")
+    # Helper: map file path ➜ first chunk entry (to inspect stored stats)
+    old_stats_by_path: dict[str, dict] = {}
+    for entry in old_metadata:
+        path_key = entry.get("path")
+        if path_key and path_key not in old_stats_by_path:
+            old_stats_by_path[path_key] = entry
 
-    # 2. Process files in batches: read, chunk, and embed
-    all_vectors = []
-    metadata = []
-    CHUNK_SIZE = 512
-    CHUNK_OVERLAP = 64
-    
+    # Current file stats lookup
+    current_stats: dict[str, tuple] = {}
     for fp in relevant_files:
+        stat = fp.stat()
+        current_stats[str(fp.relative_to(project_path))] = (stat.st_mtime, stat.st_size, fp)
+
+    # ------------------------------------------------------------
+    # Step 3.  Categorise files
+    # ------------------------------------------------------------
+    unchanged_paths: set[str] = set()
+    updated_paths: set[str] = set()
+    for rel_path, (mtime, size, _fp) in current_stats.items():
+        old = old_stats_by_path.get(rel_path)
+        if old and old.get("file_mtime") == mtime and old.get("file_size") == size and "vector" in old:
+            unchanged_paths.add(rel_path)
+        else:
+            updated_paths.add(rel_path)
+    deleted_paths: set[str] = set(old_stats_by_path.keys()) - set(current_stats.keys())
+
+    logger.info(
+        "[index] unchanged=%d updated=%d deleted=%d",
+        len(unchanged_paths), len(updated_paths), len(deleted_paths)
+    )
+
+    # ------------------------------------------------------------
+    # Step 4.  Reuse vectors for unchanged chunks
+    # ------------------------------------------------------------
+    new_metadata: list[dict] = []
+    all_vectors: list[list[float]] = []
+    for entry in old_metadata:
+        if entry.get("path") in unchanged_paths and "vector" in entry:
+            new_metadata.append(entry)
+            all_vectors.append(entry["vector"])
+
+    # ------------------------------------------------------------
+    # Step 5.  Process updated (new/modified) files
+    # ------------------------------------------------------------
+    batch_texts: list[str] = []
+    batch_meta: list[tuple[str, int, float, int]] = []  # (rel_path, offset, mtime, size)
+
+    for rel_path in updated_paths:
+        fp = current_stats[rel_path][2]
         try:
             text = fp.read_text("utf-8", errors="ignore")
-            if not text.strip(): continue
-            
+            if not text.strip():
+                continue
+            mtime, size, _ = current_stats[rel_path]
             for i in range(0, len(text), CHUNK_SIZE - CHUNK_OVERLAP):
                 chunk_content = text[i : i + CHUNK_SIZE]
-                all_vectors.append(chunk_content) # Store text temporarily
-                metadata.append({"path": str(fp.relative_to(project_path)), "content": chunk_content})
+                batch_texts.append(chunk_content)
+                batch_meta.append((rel_path, i, mtime, size))
         except Exception as e:
-            logger.warning(f"Could not read or chunk file {fp}: {e}")
+            logger.warning("[index] Could not read or chunk file %s: %s", fp, e)
+
+    # Embed in batches
+    for i in range(0, len(batch_texts), BATCH_SIZE):
+        chunk_batch = batch_texts[i : i + BATCH_SIZE]
+        vectors = _embed_batch(chunk_batch)
+        for vec, (rel_path, _offset, mtime, size) in zip(vectors, batch_meta[i : i + BATCH_SIZE]):
+            new_metadata.append({
+                "path": rel_path,
+                "content": chunk_batch.pop(0),  # pop to keep memory low
+                "vector": vec,
+                "file_mtime": mtime,
+                "file_size": size,
+            })
+            all_vectors.append(vec)
+        logger.info("[index] Embedded batch of %d chunks. Total chunks so far: %d", len(vectors), len(all_vectors))
 
     if not all_vectors:
-        return {"status": "error", "message": "Could not extract any text content from the files."}
+        return {"status": "error", "message": "No chunks available to build index (all files empty or unreadable)."}
 
-    # 3. Embed all chunks in batches for efficiency
-    embedded_vectors = []
-    PROCESSING_BATCH_SIZE = 128
-    for i in range(0, len(all_vectors), PROCESSING_BATCH_SIZE):
-        batch_texts = all_vectors[i : i + PROCESSING_BATCH_SIZE]
-        embedded_vectors.extend(_embed_batch(batch_texts))
-        logger.info(f"Processed batch: {len(batch_texts)} chunks. Total chunks so far: {len(embedded_vectors)}")
-
-    # 4. Build and save the Faiss index and metadata
+    # ------------------------------------------------------------
+    # Step 6.  Build & save FAISS index + metadata
+    # ------------------------------------------------------------
     try:
-        dimension = len(embedded_vectors[0])
-        index = faiss.IndexFlatL2(dimension)
-        index.add(np.array(embedded_vectors, dtype=np.float32))
+        dim = len(all_vectors[0])
+        index = faiss.IndexFlatL2(dim)
+        index.add(np.array(all_vectors, dtype=np.float32))
 
         faiss.write_index(index, str(index_path / "index.faiss"))
-        with open(index_path / "metadata.json", "w", encoding="utf-8") as f:
-            json.dump(metadata, f)
-            
+        with open(old_metadata_file, "w", encoding="utf-8") as f:
+            json.dump(new_metadata, f)
     except Exception as e:
-        return {"status": "error", "message": f"Failed to build or save the index: {e}"}
+        logger.exception("[index] Failed to build or save index: %s", e)
+        return {"status": "error", "message": f"Failed to build or save index: {e}"}
 
     duration = time.monotonic() - start_time
     return {
         "status": "success",
-        "message": f"Project '{project_name}' indexed successfully.",
+        "message": f"Project '{project_name}' indexed incrementally.",
         "files_scanned_and_included": len(relevant_files),
-        "total_chunks_indexed": len(embedded_vectors),
+        "unchanged_files": len(unchanged_paths),
+        "updated_files": len(updated_paths),
+        "deleted_files": len(deleted_paths),
+        "total_chunks_indexed": len(all_vectors),
         "indexing_duration_seconds": round(duration, 2),
     }
+
 
 # ---------------------------------------------------------------------------
 # Tool 2: The Search Multitool
@@ -645,7 +737,7 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
-@mcp.tool(name="search")
+@kinesis_mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
     Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
@@ -707,4 +799,4 @@ if __name__ == "__main__":
         logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")
     else:
         logger.info("Starting Project Search & Index MCP Server...")
-        mcp.run()
+        kinesis_mcp.run()

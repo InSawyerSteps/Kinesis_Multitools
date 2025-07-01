@@ -23,6 +23,65 @@ from typing import Any, Dict, List, Literal, Optional
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+# --- Add this block with the other imports ---
+import subprocess
+import difflib
+
+# Attempt to import new dependencies for /analyze and /edit tools
+try:
+    from pylint.lint import Run as pylint_run
+except ImportError:
+    pylint_run = None
+
+try:
+    from mypy import api as mypy_api
+except ImportError:
+    mypy_api = None
+
+try:
+    from bandit.core import manager as bandit_manager
+    from bandit.core import config as bandit_config
+except ImportError:
+    bandit_manager = None
+    bandit_config = None
+
+try:
+    from vulture import Vulture
+except ImportError:
+    Vulture = None
+
+try:
+    from radon.cli import cc_visit
+    from radon.cli.tools import CCHarvestor
+except ImportError:
+    cc_visit = None
+    CCHarvestor = None
+
+try:
+    import libcst as cst
+except ImportError:
+    cst = None
+
+from typing import Any, Dict, List, Literal
+
+class AnalysisRequest(BaseModel):
+    path: str
+    analyses: List[Literal["quality", "types", "security", "dead_code", "complexity", "todos"]]
+
+class EditOperation(BaseModel):
+    operation: Literal[
+        "replace_block", "insert_at", "delete_block",  # Text-based
+        "rename_symbol", "add_docstring"              # LibCST-based
+    ]
+    params: Dict[str, Any]
+
+class BatchEditRequest(BaseModel):
+    file_path: str
+    edits: List[EditOperation]
+    preview_only: bool = False
+
+# --- End of new imports and models ---
+
 # --- Dependency Imports ---
 # These are required for the tools to function.
 # Ensure you have them installed:
@@ -789,6 +848,275 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
         return search_func(request.query, project_path, request.params)
     else:
         return {"status": "error", "message": "Invalid search type specified."}
+
+# ---------------------------------------------------------------------------
+# Main execution block to run the server
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    if not LIBS_AVAILABLE:
+        logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
+
+# ---------------------------------------------------------------------------
+# Tool 3: The /analyze Multitool
+# ---------------------------------------------------------------------------
+@kinesis_mcp.tool()
+def analyze(request: AnalysisRequest) -> dict:
+    """
+    Run static analyses on files or directories (quality, types, security, dead code, complexity, TODOs).
+
+    Args:
+        request (AnalysisRequest):
+            - path (str): File or directory to analyze
+            - analyses (List[str]): Which analyses to run. Allowed: 'quality', 'types', 'security', 'dead_code', 'complexity', 'todos'.
+
+    Returns:
+        dict: {
+            'status': 'success'|'error',
+            'results': Dict[str, Any],
+            'message': str
+        }
+    Usage:
+        analyze({"path": "foo.py", "analyses": ["quality", "types"]})
+        analyze({"path": "src/", "analyses": ["dead_code", "complexity"]})
+        analyze({"path": "src/", "analyses": ["audit_package_versions"]})
+        analyze({"path": "src/", "analyses": ["check_licenses"]})
+    """
+    logger.info(f"[analyze] path={request.path} analyses={request.analyses}")
+    results = {}
+    path = pathlib.Path(request.path)
+    if not _is_safe_path(path):
+        return {"status": "error", "results": {}, "message": "Unsafe path."}
+    if not path.exists():
+        return {"status": "error", "results": {}, "message": "Path does not exist."}
+
+    try:
+        for analysis in request.analyses:
+            if analysis == "quality":
+                if pylint_run is None:
+                    results["quality"] = "pylint not installed"
+                else:
+                    logger.info(f"[analyze] Running pylint on {path}")
+                    try:
+                        import sys
+                        venv_scripts = os.path.dirname(sys.executable)
+                        pylint_path = os.path.join(venv_scripts, 'pylint.exe')
+                        logger.info(f"[analyze] Using pylint at: {pylint_path}")
+                        pylint_output = subprocess.run([
+                            pylint_path, str(path)
+                        ], capture_output=True, text=True, timeout=60)
+                        results["quality"] = pylint_output.stdout
+                    except Exception as e:
+                        results["quality"] = f"pylint error: {e}"
+            elif analysis == "types":
+                if mypy_api is None:
+                    results["types"] = "mypy not installed"
+                else:
+                    logger.info(f"[analyze] Running mypy on {path}")
+                    try:
+                        mypy_result = mypy_api.run([str(path)])
+                        results["types"] = mypy_result[0]
+                    except Exception as e:
+                        results["types"] = f"mypy error: {e}"
+            elif analysis == "security":
+                if bandit_manager is None or bandit_config is None:
+                    results["security"] = "bandit not installed"
+                else:
+                    logger.info(f"[analyze] Running bandit on {path}")
+                    try:
+                        conf = bandit_config.BanditConfig()
+                        mgr = bandit_manager.BanditManager(conf, "file")
+                        mgr.discover_files([str(path)])
+                        mgr.run_tests()
+                        # Convert Bandit issues to dicts, compatibly for all Bandit versions
+                        try:
+                            issues = mgr.get_issue_list(sev_filter=None, conf_filter=None)
+                        except TypeError as te:
+                            logger.warning(f"[analyze] Bandit get_issue_list() does not accept sev_filter/conf_filter: {te}. Retrying without arguments.")
+                            issues = mgr.get_issue_list()
+                        results["security"] = [issue.as_dict() if hasattr(issue, 'as_dict') else str(issue) for issue in issues]
+                    except Exception as e:
+                        results["security"] = f"bandit error: {e}"
+            elif analysis == "dead_code":
+                if Vulture is None:
+                    results["dead_code"] = "vulture not installed"
+                else:
+                    logger.info(f"[analyze] Running vulture on {path}")
+                    try:
+                        v = Vulture()
+                        v.scavenge([str(path)])
+                        # Vulture returns a list of Item objects; convert them to dicts
+                        unused = v.get_unused_code()
+                        results["dead_code"] = [item.__dict__ if hasattr(item, '__dict__') else str(item) for item in unused]
+                    except Exception as e:
+                        results["dead_code"] = f"vulture error: {e}"
+            elif analysis == "complexity":
+                if cc_visit is None:
+                    results["complexity"] = "radon not installed"
+                else:
+                    logger.info(f"[analyze] Running radon on {path}")
+                    try:
+                        cc_results = cc_visit([str(path)])
+                        # Radon returns blocks with attributes; convert to dicts
+                        results["complexity"] = [
+                            {
+                                "name": getattr(block, "name", None),
+                                "complexity": getattr(block, "complexity", None),
+                                "lineno": getattr(block, "lineno", None),
+                                "endline": getattr(block, "endline", None)
+                            }
+                            for block in cc_results
+                        ]
+                    except Exception as e:
+                        results["complexity"] = f"radon error: {e}"
+            elif analysis == "todos":
+                logger.info(f"[analyze] Scanning for TODOs in {path}")
+                try:
+                    todos = []
+                    if path.is_file():
+                        with path.open("r", encoding="utf-8", errors="ignore") as f:
+                            for i, line in enumerate(f, 1):
+                                if "TODO" in line:
+                                    todos.append({"line": i, "text": line.strip()})
+                    else:
+                        for file in path.rglob("*.py"):
+                            with file.open("r", encoding="utf-8", errors="ignore") as f:
+                                for i, line in enumerate(f, 1):
+                                    if "TODO" in line:
+                                        todos.append({"file": str(file), "line": i, "text": line.strip()})
+                    results["todos"] = todos
+                except Exception as e:
+                    results["todos"] = f"TODO scan error: {e}"
+            elif analysis == "audit_package_versions":
+                try:
+                    audit_req = AuditPackageVersionsRequest()
+                    results["audit_package_versions"] = audit_package_versions(audit_req)
+                except Exception as e:
+                    results["audit_package_versions"] = f"audit_package_versions error: {e}"
+            elif analysis == "check_licenses":
+                try:
+                    license_req = CheckLicensesRequest()
+                    results["check_licenses"] = check_licenses(license_req)
+                except Exception as e:
+                    results["check_licenses"] = f"check_licenses error: {e}"
+            else:
+                results[analysis] = f"Unknown analysis: {analysis}"
+        return {"status": "success", "results": results, "message": "Analysis complete."}
+    except Exception as e:
+        logger.error(f"[analyze] error: {e}", exc_info=True)
+        return {"status": "error", "results": results, "message": str(e)}
+
+# ---------------------------------------------------------------------------
+# Tool 4: The /edit Multitool
+# ---------------------------------------------------------------------------
+@kinesis_mcp.tool()
+def edit(request: BatchEditRequest) -> dict:
+    """
+    Perform batch code edits (replace, insert, delete, rename symbol, add docstring) with preview/diff support.
+
+    Args:
+        request (BatchEditRequest):
+            - file_path (str): File to edit
+            - edits (List[EditOperation]): List of edit operations to apply
+            - preview_only (bool): If True, only preview/diff changes, do not write
+
+    Returns:
+        dict: {
+            'status': 'success'|'error',
+            'preview': bool,
+            'diff': str (if preview),
+            'modified_content': str (if preview),
+            'message': str
+        }
+    Usage:
+        edit({"file_path": "foo.py", "edits": [{"operation": "replace_block", ...}], "preview_only": true})
+    """
+    logger.info(f"[edit] file_path={request.file_path} preview_only={request.preview_only}")
+    target_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(target_path):
+        return {"status": "error", "message": "Unsafe path."}
+    if not target_path.is_file():
+        return {"status": "error", "message": "File not found."}
+    try:
+        original_content = target_path.read_text("utf-8")
+        modified_content = original_content
+
+        # Text-based operations
+        for edit_op in request.edits:
+            if edit_op.operation == "replace_block":
+                logger.info(f"[edit] replace_block params={edit_op.params}")
+                old = edit_op.params.get("old")
+                new = edit_op.params.get("new")
+                if old is None or new is None:
+                    raise ValueError("replace_block requires 'old' and 'new' params")
+                modified_content = modified_content.replace(old, new)
+            elif edit_op.operation == "insert_at":
+                logger.info(f"[edit] insert_at params={edit_op.params}")
+                idx = edit_op.params.get("index")
+                text = edit_op.params.get("text")
+                if idx is None or text is None:
+                    raise ValueError("insert_at requires 'index' and 'text' params")
+                lines = modified_content.splitlines(keepends=True)
+                lines.insert(idx, text)
+                modified_content = "".join(lines)
+            elif edit_op.operation == "delete_block":
+                logger.info(f"[edit] delete_block params={edit_op.params}")
+                block = edit_op.params.get("block")
+                if block is None:
+                    raise ValueError("delete_block requires 'block' param")
+                modified_content = modified_content.replace(block, "")
+
+        # LibCST-based operations (rename_symbol, add_docstring)
+        if any(op.operation in ("rename_symbol", "add_docstring") for op in request.edits):
+            if not cst:
+                return {"status": "error", "message": "LibCST is not installed, cannot perform edits."}
+            class LibCSTEditor:
+                def __init__(self, code):
+                    self.code = code
+                def rename(self, old, new):
+                    # Placeholder: actual LibCST logic should go here
+                    self.code = self.code.replace(old, new)
+                def add_docstring(self, node, doc):
+                    # Placeholder: actual LibCST logic should go here
+                    self.code = self.code  # No-op for now
+            editor = LibCSTEditor(modified_content)
+            for edit_op in request.edits:
+                if edit_op.operation == "rename_symbol":
+                    old = edit_op.params.get("old")
+                    new = edit_op.params.get("new")
+                    if old is None or new is None:
+                        raise ValueError("rename_symbol requires 'old' and 'new' params")
+                    editor.rename(old, new)
+                elif edit_op.operation == "add_docstring":
+                    node = edit_op.params.get("node")
+                    doc = edit_op.params.get("doc")
+                    if node is None or doc is None:
+                        raise ValueError("add_docstring requires 'node' and 'doc' params")
+                    editor.add_docstring(node, doc)
+            modified_content = editor.code
+
+        if request.preview_only:
+            diff = "".join(difflib.unified_diff(
+                original_content.splitlines(keepends=True),
+                modified_content.splitlines(keepends=True),
+                fromfile=f"a/{request.file_path}",
+                tofile=f"b/{request.file_path}",
+            ))
+            return {
+                "status": "success",
+                "preview": True,
+                "diff": diff,
+                "modified_content": modified_content
+            }
+        else:
+            target_path.write_text(modified_content, "utf-8")
+            return {
+                "status": "success",
+                "preview": False,
+                "message": f"Successfully applied {len(request.edits)} edits to '{request.file_path}'."
+            }
+    except Exception as e:
+        logger.error(f"[edit] Transaction failed for file '{request.file_path}': {e}", exc_info=True)
+        return {"status": "error", "message": f"Edit failed: {e}"}
 
 # ---------------------------------------------------------------------------
 # Main execution block to run the server
