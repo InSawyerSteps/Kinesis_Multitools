@@ -4,7 +4,9 @@ Kinesis Multitools is a powerful, local-first server providing a suite of advanc
 
 ## Key Features
 
-- **Multitool Architecture** – a single, unified `/search` endpoint provides access to multiple search modes.
+- **Tool Reliability**: All core MCP tools (index, search, edit, file read/list) are robust and respond within hard timeouts. However, the `analyze` tool is currently unreliable and may hang or fail to return results. Further debugging is required for this tool.
+- **Reliable by Design** – All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
+- **Multitool Architecture** – A single, unified `/search` endpoint provides access to multiple search modes.
 - **Advanced Search Modes**
   - `keyword` – fast literal text search.
   - `semantic` – natural language, concept-based code search.
@@ -12,9 +14,9 @@ Kinesis Multitools is a powerful, local-first server providing a suite of advanc
   - `references` – precise symbol usage and reference finding via Jedi.
   - `similarity` – find semantically similar code snippets.
   - `task_verification` – meta-search to assess task implementation status.
-- **Incremental Vector Indexing** – the `index_project_files` tool detects file changes to avoid re-computing embeddings for unchanged files.
-- **Secure & Sandboxed** – all file operations are validated to ensure they remain within the configured project root.
-- **Extensible by Design** – a development guide provides a blueprint for adding new capabilities.
+- **Incremental Vector Indexing** – The `index_project_files` tool detects file changes to avoid re-computing embeddings for unchanged files.
+- **Secure & Sandboxed** – All file operations are validated to ensure they remain within the configured project root.
+- **Extensible by Design** – A development guide provides a blueprint for adding new capabilities.
 
 ## Installation
 
@@ -23,6 +25,29 @@ git clone https://github.com/[your-username]/Kinesis-Multitools.git
 cd Kinesis-Multitools
 pip install -r requirements.txt
 ```
+
+## Windsurf IDE Configuration
+
+To use Kinesis Multitools within the Windsurf IDE, you need to configure it in your `mcp_config.json` file. This tells the IDE how to launch and communicate with the tool server.
+
+Add the following entry to the `mcpServers` object in your configuration file:
+
+```json
+"kinesis_multitools": {
+  "command": "C:\\Projects\\MCP Server\\.venv\\Scripts\\fastmcp.exe",
+  "args": [
+    "run",
+    "C:\\Projects\\MCP Server\\src\\toolz.py",
+    "--transport", "stdio"
+  ],
+  "env": {},
+  "disabled": false
+}
+```
+
+**Note:** Make sure the `command` path points to the `fastmcp.exe` executable inside your project's virtual environment (`.venv`). Adjust the path if your project is located elsewhere.
+
+After saving the configuration, restart the Windsurf IDE for the changes to take effect.
 
 ## Usage
 

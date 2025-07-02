@@ -44,6 +44,12 @@ try:
 except Exception:
     pass
 
+import concurrent.futures
+import functools
+import traceback
+import multiprocessing
+import time
+
 # This module provides two primary tools for an AI agent:
 #   - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
 #   - search: A powerful "multitool" that provides multiple modes of searching:
@@ -183,14 +189,21 @@ try:
     from sentence_transformers import SentenceTransformer
     import torch
     
-    # --- Global Model and Device Configuration ---
-    # This setup is done once when the module is loaded for efficiency.
+    # --- Global Model and Device Configuration (with Lazy Loading) ---
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    _ST_MODEL = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
-    
-    # Suppress the noisy INFO log from SentenceTransformer
-    st_logger = logging.getLogger("sentence_transformers.SentenceTransformer")
-    st_logger.setLevel(logging.WARNING)
+    _ST_MODEL_INSTANCE = None
+
+    def _get_st_model():
+        """Lazily loads the SentenceTransformer model on first use."""
+        global _ST_MODEL_INSTANCE
+        if _ST_MODEL_INSTANCE is None:
+            logger.info(f"[Lazy Load] Loading sentence-transformer model 'all-MiniLM-L6-v2' onto device '{DEVICE}'...")
+            _ST_MODEL_INSTANCE = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
+            # Suppress the noisy INFO log from SentenceTransformer after loading
+            st_logger = logging.getLogger("sentence_transformers.SentenceTransformer")
+            st_logger.setLevel(logging.WARNING)
+            logger.info("[Lazy Load] Model loaded successfully.")
+        return _ST_MODEL_INSTANCE
 
     LIBS_AVAILABLE = True
 except ImportError:
@@ -204,7 +217,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # FastMCP initialisation & logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp_search_tools")
 
 logger.info("[MCP SERVER IMPORT] Importing src/toolz.py and initializing FastMCP instance...")
@@ -212,16 +224,6 @@ mcp = FastMCP(
     name="MCP-Server",
 )
 
-@mcp.tool()
-def ping() -> dict:
-    """
-    Simple ping tool for MCP registration test.
-
-    Returns:
-        dict: {"status": "pong"}
-    """
-    logger.info("[MCP TOOL] ping called.")
-    return {"status": "pong"}
 
 # ---------------------------------------------------------------------------
 # Project root configuration
@@ -236,6 +238,74 @@ INDEX_DIR_NAME = ".windsurf_search_index"
 # ---------------------------------------------------------------------------
 # Core Helper Functions
 # ---------------------------------------------------------------------------
+
+
+import concurrent.futures
+import functools
+import traceback
+import multiprocessing
+import time
+
+def tool_process_timeout_and_errors(timeout=60):
+    """
+    Decorator to run a function in a separate process with a hard timeout and robust error handling.
+    Returns MCP-protocol-compliant error dicts on timeout or exception.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            def target_fn(q, *a, **k):
+                try:
+                    result = func(*a, **k)
+                    q.put(("success", result))
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    q.put(("error", {"status": "error", "message": str(e), "traceback": tb}))
+            q = multiprocessing.Queue()
+            p = multiprocessing.Process(target=target_fn, args=(q, *args), kwargs=kwargs)
+            p.start()
+            try:
+                status, result = q.get(timeout=timeout)
+                p.join(1)
+                if status == "success":
+                    return result
+                else:
+                    logging.error(f"[tool_process_timeout_and_errors] Tool error: {result.get('message')}")
+                    return result
+            except Exception as e:
+                p.terminate()
+                logging.error(f"[tool_process_timeout_and_errors] Tool timed out or crashed: {e}")
+                return {"status": "error", "message": f"Tool timed out after {timeout} seconds or crashed.", "exception": str(e)}
+        return wrapper
+    return decorator
+
+def tool_timeout_and_errors(timeout=60):
+    """
+    Decorator to enforce timeout and robust error handling for MCP tool functions.
+    Logs all exceptions and timeouts. Returns a dict with status and error message on failure.
+    Args:
+        timeout (int): Timeout in seconds for the tool execution.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            logger = logging.getLogger("mcp_search_tools")
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(func, *args, **kwargs)
+                    try:
+                        return future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f"[TIMEOUT] Tool '{func.__name__}' timed out after {timeout} seconds.")
+                        return {"status": "error", "message": f"Tool '{func.__name__}' timed out after {timeout} seconds."}
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error(f"[EXCEPTION] Tool '{func.__name__}' failed: {e}\n{tb}")
+                return {"status": "error", "message": f"Tool '{func.__name__}' failed: {e}", "traceback": tb}
+        return wrapper
+    return decorator
+
+
 
 def _get_project_path(project_name: str) -> Optional[pathlib.Path]:
     """Gets the root path for a given project name."""
@@ -274,12 +344,13 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
         yield p
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
-    """Encodes a batch of texts into vector embeddings using the loaded model."""
-    if not LIBS_AVAILABLE or _ST_MODEL is None:
+    """Encodes a batch of texts into vector embeddings using the lazily-loaded model."""
+    if not LIBS_AVAILABLE:
         raise RuntimeError("Embedding libraries (torch, sentence-transformers) are not available.")
+    model = _get_st_model()
     logger.info(f"Embedding a batch of {len(texts)} texts on {DEVICE}...")
     with torch.no_grad():
-        return _ST_MODEL.encode(texts, batch_size=32, show_progress_bar=False, device=DEVICE).tolist()
+        return model.encode(texts, batch_size=32, show_progress_bar=False, device=DEVICE).tolist()
 
 def _is_safe_path(path: pathlib.Path) -> bool:
     """Ensure *path* is inside one of the PROJECT_ROOTS roots."""
@@ -297,6 +368,7 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@tool_timeout_and_errors(timeout=60)
 def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
     """
     Recursively list files for a given project.
@@ -330,6 +402,7 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
     return results
 
 @mcp.tool()
+@tool_timeout_and_errors(timeout=60)
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -371,8 +444,9 @@ def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Di
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> Dict:
+@tool_process_timeout_and_errors(timeout=300)
+@mcp.tool(name="index_project_files")
+def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> dict:
     """
     Index the project for semantic search **incrementally**.
 
@@ -852,8 +926,6 @@ def _search_for_references(query: str, project_path: pathlib.Path, params: Dict)
             return {"status": "not_found", "message": "No references found."}
         return {"status": "success", "results": grep_results}
 
-    return {"status": "error", "message": "Not enough parameters for reference search."}
-
 def _search_for_similarity(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Finds code chunks semantically similar to the query block of code."""
     # This is essentially a semantic search where the query is a block of code.
@@ -898,10 +970,13 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
+@tool_process_timeout_and_errors(timeout=120)  # Increased timeout for potentially long searches
 @mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
     Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
+    This tool enforces a hard timeout and robust error handling using a separate process.
+    If the tool fails or times out, it returns a structured MCP error response.
 
     Args:
         request (SearchRequest):
@@ -916,7 +991,9 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
                 - file_path, line, column (for 'references').
 
     Returns:
-        dict: {'status': 'success'|'error'|'not_found', 'results': list, ...}
+        dict: {
+            'status': 'success'|'error'|'not_found', 'results': list, ...
+        }
 
     Usage:
         - 'keyword': Fast literal search. Supports includes, extensions, max_results.
@@ -952,19 +1029,15 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
         return {"status": "error", "message": "Invalid search type specified."}
 
 # ---------------------------------------------------------------------------
-# Main execution block to run the server
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    if not LIBS_AVAILABLE:
-        logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
-
-# ---------------------------------------------------------------------------
 # Tool 3: The /analyze Multitool
 # ---------------------------------------------------------------------------
+@tool_process_timeout_and_errors(timeout=60)
 @mcp.tool()
 def analyze(request: AnalysisRequest) -> dict:
     """
     Run static analyses on files or directories (quality, types, security, dead code, complexity, TODOs).
+    This tool enforces a 60-second hard timeout and robust error handling using a separate process.
+    If the tool fails or times out, it returns a structured MCP error response.
 
     Args:
         request (AnalysisRequest):
@@ -987,6 +1060,7 @@ def analyze(request: AnalysisRequest) -> dict:
     results = {}
     path = pathlib.Path(request.path)
     if not _is_safe_path(path):
+        return {"status": "error", "message": "Unsafe path."}
         return {"status": "error", "results": {}, "message": "Unsafe path."}
     if not path.exists():
         return {"status": "error", "results": {}, "message": "Path does not exist."}
@@ -1007,10 +1081,16 @@ def analyze(request: AnalysisRequest) -> dict:
                             pylint_exec = 'pylint'
                         pylint_path = os.path.join(venv_scripts, pylint_exec)
                         logger.info(f"[analyze] Using pylint at: {pylint_path}")
-                        pylint_output = subprocess.run([
-                            pylint_path, str(path)
-                        ], capture_output=True, text=True, timeout=60)
-                        results["quality"] = pylint_output.stdout
+                        try:
+                            pylint_output = subprocess.run([
+                                pylint_path, str(path)
+                            ], capture_output=True, text=True, timeout=60)
+                            results["quality"] = pylint_output.stdout
+                        except subprocess.TimeoutExpired:
+                            logger.error(f"[analyze] pylint timed out on {path}")
+                            results["quality"] = "pylint timed out after 60 seconds."
+                        except Exception as e:
+                            results["quality"] = f"pylint error: {e}"
                     except Exception as e:
                         results["quality"] = f"pylint error: {e}"
             elif analysis == "types":
@@ -1104,10 +1184,12 @@ def analyze(request: AnalysisRequest) -> dict:
 # ---------------------------------------------------------------------------
 # Tool 4: The /edit Multitool
 # ---------------------------------------------------------------------------
+@tool_process_timeout_and_errors(timeout=60)
 @mcp.tool()
 def edit(request: BatchEditRequest) -> dict:
     """
     Perform batch code edits (replace, insert, delete, rename symbol, add docstring) with preview/diff support.
+    This tool enforces a hard timeout and robust error handling using a separate process.
 
     Args:
         request (BatchEditRequest):
@@ -1161,33 +1243,9 @@ def edit(request: BatchEditRequest) -> dict:
                     raise ValueError("delete_block requires 'block' param")
                 modified_content = modified_content.replace(block, "")
 
-        # LibCST-based operations (rename_symbol, add_docstring)
+        # LibCST-based operations (rename_symbol, add_docstring) are not yet supported.
         if any(op.operation in ("rename_symbol", "add_docstring") for op in request.edits):
-            if not cst:
-                return {"status": "error", "message": "LibCST is not installed, cannot perform edits."}
-            # TODO: Replace with actual LibCST logic for code transformations
-            class LibCSTEditor:
-                def __init__(self, code):
-                    self.code = code
-                def rename(self, old, new):
-                    raise NotImplementedError("LibCST-based rename not implemented yet.")
-                def add_docstring(self, node, doc):
-                    raise NotImplementedError("LibCST-based docstring insertion not implemented yet.")
-            editor = LibCSTEditor(modified_content)
-            for edit_op in request.edits:
-                if edit_op.operation == "rename_symbol":
-                    old = edit_op.params.get("old")
-                    new = edit_op.params.get("new")
-                    if old is None or new is None:
-                        raise ValueError("rename_symbol requires 'old' and 'new' params")
-                    editor.rename(old, new)
-                elif edit_op.operation == "add_docstring":
-                    node = edit_op.params.get("node")
-                    doc = edit_op.params.get("doc")
-                    if node is None or doc is None:
-                        raise ValueError("add_docstring requires 'node' and 'doc' params")
-                    editor.add_docstring(node, doc)
-            modified_content = editor.code
+            return {"status": "error", "message": "AST-based edits like 'rename_symbol' and 'add_docstring' are not supported in this version."}
 
         if request.preview_only:
             diff = "".join(difflib.unified_diff(
@@ -1217,6 +1275,10 @@ def edit(request: BatchEditRequest) -> dict:
 # Main execution block to run the server
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    # NOTE: This block is NOT re-imported by child processes, making it the safe
+    # entry point for application startup.
+    multiprocessing.freeze_support() # For pyinstaller compatibility
+    logger.info("[MCP SERVER START] Starting server...")
     if not LIBS_AVAILABLE:
         logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
         logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")

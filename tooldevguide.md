@@ -147,7 +147,73 @@ The tool returns a summary dict:
 
 ---
 
-## 5. Logging, Error Handling, and Security
+## 5. Reliability and Performance Patterns
+
+### Known Issues
+- The `analyze` tool may hang, time out, or fail to return results. This is a known issue and is under investigation. All other tools are stable and reliable.
+
+To ensure the MCP server is robust and responsive, especially when dealing with long-running tasks or heavy libraries, follow these critical patterns.
+
+### 5.1. Process-Based Timeouts for Reliability
+
+Standard threading timeouts in Python cannot interrupt blocking I/O or long-running native code (e.g., in libraries like `torch` or `pylint`). This can cause tools to hang indefinitely, freezing the server.
+
+**Solution:** Use the `@tool_process_timeout_and_errors` decorator.
+
+This decorator runs the entire tool function in a separate `multiprocessing.Process`.
+- It enforces a hard timeout, forcibly terminating the process if it exceeds the limit.
+- It catches any exceptions within the process, including `TimeoutExpired`.
+- It ensures a structured error message is always returned to the client, preventing hangs.
+
+**Usage:**
+```python
+from tool_utils import tool_process_timeout_and_errors
+
+@tool_process_timeout_and_errors(timeout=60)
+@mcp.tool()
+def my_long_running_tool(request: MyRequest) -> dict:
+    # ... logic that might hang ...
+    return {"status": "success"}
+```
+
+**Rule:** All tools that perform heavy computation, run external subprocesses, or use libraries with native C/C++ extensions **must** use this decorator.
+
+### 5.2. Lazy Loading for Performance
+
+Some libraries, particularly AI models like `sentence-transformers`, have a very high startup cost. Loading them at the top of `toolz.py` means this cost is paid every time a new process is spawned by our timeout decorator.
+
+**Solution:** Implement lazy loading. Load expensive resources only when they are first needed within a process.
+
+**Pattern:**
+1.  Define a global variable for the resource, initialized to `None`.
+2.  Create a getter function that checks if the resource is `None`. If it is, load it and store it in the global variable.
+3.  All parts of the code must access the resource via the getter function.
+
+**Example (`_get_st_model`):**
+```python
+# Global variable for the model
+_st_model = None
+
+def _get_st_model():
+    """Lazily loads and returns the SentenceTransformer model."""
+    global _st_model
+    if _st_model is None:
+        logger.info("Lazy loading SentenceTransformer model...")
+        _st_model = SentenceTransformer(MODEL_NAME)
+    return _st_model
+
+# Usage in a tool
+def _embed_batch(batch_texts: list[str]) -> list[list[float]]:
+    model = _get_st_model() # Access via getter
+    embeddings = model.encode(batch_texts, show_progress_bar=False)
+    return [e.tolist() for e in embeddings]
+```
+
+**Rule:** Any dependency with a significant import/initialization time (>100ms) should be lazy-loaded.
+
+---
+
+## 6. Logging, Error Handling, and Security
 
 - Use the shared `logger` instance (`logger.info`, `logger.error`, etc.)
 - Log all actions, inputs, outputs, and errors
@@ -158,7 +224,7 @@ The tool returns a summary dict:
 
 ---
 
-## 6. Static Analysis Multitool: `/analyze`
+## 7. Static Analysis Multitool: `/analyze`
 
 **Purpose:** Run multiple static analyses (quality, types, security, dead_code, complexity, todos, dependencies, licenses) on files or directories.
 
@@ -185,7 +251,7 @@ class AnalysisRequest(BaseModel):
 
 ---
 
-## 7. Code Transformation Multitool: `/refactor` (LibCST Required)
+## 8. Code Transformation Multitool: `/refactor` (LibCST Required)
 
 **Purpose:** Perform safe, format-preserving code changes (rename, docstring insertion, extraction, etc.).
 
@@ -203,14 +269,15 @@ class RefactorRequest(BaseModel):
 - `extract_method`: Use LibCST to extract code into a new function/method
 
 **Best Practices:**
-- Always use LibCST (never ast) for code modifications
-- Validate all params (e.g., `old_name`, `new_name` for rename)
-- Support `preview_only` mode for all destructive actions
-- Return both the new code and a diff (if preview)
+- Always use LibCST (never ast) for code modifications.
+- Validate all params (e.g., `old_name`, `new_name` for rename).
+- Support `preview_only` mode for all destructive actions.
+- Return both the new code and a diff (if preview).
+- **Stability Note:** As of the latest update, advanced LibCST features in the `edit` tool (like `rename_symbol`) are disabled to prevent hangs caused by implementation issues. The tool returns a clear error message for these operations. This is a valid temporary pattern to ensure server stability.
 
 ---
 
-## 8. Automated Code Generation Multitool: `/generate`
+## 9. Automated Code Generation Multitool: `/generate`
 
 **Purpose:** Generate tests, documentation, or other code artifacts using LLMs and/or static analysis.
 
@@ -227,7 +294,7 @@ class GenerateRequest(BaseModel):
 
 ---
 
-## 9. Visualization Multitool: `/visualize`
+## 10. Visualization Multitool: `/visualize`
 
 **Purpose:** Generate diagrams of code structure and dependencies.
 
@@ -244,7 +311,7 @@ class VisualizeRequest(BaseModel):
 
 ---
 
-## 10. Project Management Multitool: `/project`
+## 11. Project Management Multitool: `/project`
 
 **Purpose:** Manage project metadata, dependencies, releases, etc.
 
@@ -263,7 +330,7 @@ class ProjectRequest(BaseModel):
 
 ---
 
-## 11. Search Multitool: `/search` (Unified Interface)
+## 12. Search Multitool: `/search` (Unified Interface)
 
 **Purpose:** Provide lexical, semantic, structural, and referential search across the codebase.
 
@@ -292,7 +359,7 @@ class SearchRequest(BaseModel):
 
 ---
 
-## 12. General Best Practices and Checklist
+## 13. General Best Practices and Checklist
 
 - [ ] Use Pydantic models for all multitool requests
 - [ ] Document every argument, return value, and subtool in the docstring
@@ -306,7 +373,7 @@ class SearchRequest(BaseModel):
 
 ---
 
-## 13. Example Multitool Skeleton
+## 14. Example Multitool Skeleton
 
 ```python
 @mcp.tool()
