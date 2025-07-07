@@ -1179,16 +1179,13 @@ def analyze(request: AnalysisRequest) -> dict:
         return {"status": "success", "results": results, "message": "Analysis complete."}
     except Exception as e:
         logger.error(f"[analyze] error: {e}", exc_info=True)
-        return {"status": "error", "results": results, "message": str(e)}
-
-# ---------------------------------------------------------------------------
 # Tool 4: The /edit Multitool
 # ---------------------------------------------------------------------------
 @tool_process_timeout_and_errors(timeout=60)
 @mcp.tool()
 def edit(request: BatchEditRequest) -> dict:
     """
-    Perform batch code edits (replace, insert, delete, rename symbol, add docstring) with preview/diff support.
+    Perform batch code edits (replace, insert, delete) with preview/diff support.
     This tool enforces a hard timeout and robust error handling using a separate process.
 
     Args:
@@ -1208,45 +1205,46 @@ def edit(request: BatchEditRequest) -> dict:
     Usage:
         edit({"file_path": "foo.py", "edits": [{"operation": "replace_block", ...}], "preview_only": true})
     """
+    import difflib
     logger.info(f"[edit] file_path={request.file_path} preview_only={request.preview_only}")
     target_path = pathlib.Path(request.file_path)
     if not _is_safe_path(target_path):
+        logger.error(f"[edit] Unsafe path: {target_path}")
         return {"status": "error", "message": "Unsafe path."}
     if not target_path.is_file():
+        logger.error(f"[edit] File not found: {target_path}")
         return {"status": "error", "message": "File not found."}
     try:
         original_content = target_path.read_text("utf-8")
         modified_content = original_content
-
-        # Text-based operations
         for edit_op in request.edits:
-            if edit_op.operation == "replace_block":
-                logger.info(f"[edit] replace_block params={edit_op.params}")
-                old = edit_op.params.get("old")
-                new = edit_op.params.get("new")
+            op = edit_op.operation
+            params = edit_op.params
+            logger.info(f"[edit] op={op} params={params}")
+            if op == "replace_block":
+                old = params.get("old")
+                new = params.get("new")
                 if old is None or new is None:
                     raise ValueError("replace_block requires 'old' and 'new' params")
                 modified_content = modified_content.replace(old, new)
-            elif edit_op.operation == "insert_at":
-                logger.info(f"[edit] insert_at params={edit_op.params}")
-                idx = edit_op.params.get("index")
-                text = edit_op.params.get("text")
+            elif op == "insert_at":
+                idx = params.get("index")
+                text = params.get("text")
                 if idx is None or text is None:
                     raise ValueError("insert_at requires 'index' and 'text' params")
                 lines = modified_content.splitlines(keepends=True)
-                lines.insert(idx, text)
+                if not (0 <= idx <= len(lines)):
+                    raise ValueError(f"insert_at index out of range: {idx}")
+                lines.insert(idx, text if text.endswith("\n") else text + "\n")
                 modified_content = "".join(lines)
-            elif edit_op.operation == "delete_block":
-                logger.info(f"[edit] delete_block params={edit_op.params}")
-                block = edit_op.params.get("block")
+            elif op == "delete_block":
+                block = params.get("block")
                 if block is None:
                     raise ValueError("delete_block requires 'block' param")
                 modified_content = modified_content.replace(block, "")
-
-        # LibCST-based operations (rename_symbol, add_docstring) are not yet supported.
-        if any(op.operation in ("rename_symbol", "add_docstring") for op in request.edits):
-            return {"status": "error", "message": "AST-based edits like 'rename_symbol' and 'add_docstring' are not supported in this version."}
-
+            else:
+                logger.error(f"[edit] Unsupported operation: {op}")
+                return {"status": "error", "message": f"Unsupported operation: {op}"}
         if request.preview_only:
             diff = "".join(difflib.unified_diff(
                 original_content.splitlines(keepends=True),
@@ -1254,6 +1252,7 @@ def edit(request: BatchEditRequest) -> dict:
                 fromfile=f"a/{request.file_path}",
                 tofile=f"b/{request.file_path}",
             ))
+            logger.info(f"[edit] Preview diff generated.")
             return {
                 "status": "success",
                 "preview": True,
@@ -1262,6 +1261,7 @@ def edit(request: BatchEditRequest) -> dict:
             }
         else:
             target_path.write_text(modified_content, "utf-8")
+            logger.info(f"[edit] Applied {len(request.edits)} edits to {target_path}")
             return {
                 "status": "success",
                 "preview": False,
@@ -1270,12 +1270,6 @@ def edit(request: BatchEditRequest) -> dict:
     except Exception as e:
         logger.error(f"[edit] Transaction failed for file '{request.file_path}': {e}", exc_info=True)
         return {"status": "error", "message": f"Edit failed: {e}"}
-
-# ---------------------------------------------------------------------------
-# Main execution block to run the server
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    # NOTE: This block is NOT re-imported by child processes, making it the safe
     # entry point for application startup.
     multiprocessing.freeze_support() # For pyinstaller compatibility
     logger.info("[MCP SERVER START] Starting server...")
