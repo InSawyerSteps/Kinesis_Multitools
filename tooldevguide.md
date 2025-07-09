@@ -1,14 +1,22 @@
 # MCP Server Next-Gen Tool Development Guide
 
-> **Supported MCP Tools (2025-07-07):**
+> **Supported MCP Tools (as of July 2025):**
 >
 > - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
 > - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
 > - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
-> - File read/list utilities.
+> - File read/list utilities: Safe recursive listing and reading of project files.
 >
 > **Removed tools:**
-> - `analyze` and `edit` tools have been removed due to architectural limitations and instability. They are not present in this release. Future analysis or edit tools must be asynchronous, library-based, and robustly tested before inclusion.
+> - `analyze` and `edit` tools have been removed for stability and are not present in this release. Only the tools above are supported. Future tools must be asynchronous, library-based, and robustly tested before inclusion.
+
+---
+
+## FastMCP Version and Dependency Management
+
+- This project uses `fastmcp==2.9.2` (see `requirements.txt`).
+- All dependencies and versions are listed in `requirements.txt` and must be kept in sync with actual usage in `src/toolz.py` and the server runtime.
+- For GPU support, see the torch install instructions in `requirements.txt`.
 
 ---
 

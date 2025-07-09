@@ -1,24 +1,24 @@
 # Kinesis Multitools
 
-Kinesis Multitools is a powerful, local-first server providing a suite of advanced tools for AI-driven software development. Designed for integration with modern IDEs, it empowers AI agents with robust capabilities for code intelligence, analysis, and modification—allowing them to interact with and shape your codebase with precision.
+Kinesis Multitools is a robust, local-first MCP server providing advanced tools for AI-driven software development. It is designed for integration with modern IDEs (like Windsurf) and empowers AI agents with comprehensive code intelligence, analysis, and search capabilities.
 
 ## Key Features
 
-- **Tool Reliability**: The supported MCP tools—`index_project_files`, `search` (all modes), and file read/list—are robust and respond within hard timeouts. The previous `analyze` and `edit` tools have been removed due to architectural limitations and instability. Only the tools documented below are supported.
-- **Reliable by Design** – All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
-- **Multitool Architecture** – A single, unified `/search` endpoint provides access to multiple search modes. Only the documented search subtools are supported.
-- **Advanced Search Modes**
-  - `keyword` – fast literal text search.
-  - `semantic` – natural language, concept-based code search.
-  - `ast` – structural search for function and class definitions.
-  - `references` – precise symbol usage and reference finding via Jedi.
-  - `similarity` – find semantically similar code snippets.
-  - `task_verification` – meta-search to assess task implementation status.
-- **Incremental Vector Indexing** – The `index_project_files` tool detects file changes to avoid re-computing embeddings for unchanged files.
-- **Secure & Sandboxed** – All file operations are validated to ensure they remain within the configured project root.
-- **Extensible by Design** – A development guide provides a blueprint for adding new capabilities.
+- **Modern FastMCP Backend:**
+  - Uses `fastmcp==2.9.2` for maximum performance and compatibility (see `requirements.txt`).
+- **Supported MCP Tools:**
+  - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
+  - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+  - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
+  - File read/list utilities: Safe listing and reading of project files.
+- **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
+- **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
+- **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
+- **Extensible:** A development guide (`tooldevguide.md`) provides a blueprint for adding new capabilities.
 
 ## Installation
+
+Clone the repository and install dependencies:
 
 ```bash
 git clone https://github.com/[your-username]/Kinesis-Multitools.git
@@ -26,11 +26,38 @@ cd Kinesis-Multitools
 pip install -r requirements.txt
 ```
 
+**Dependency Note:**
+All required libraries and versions are listed in `requirements.txt`. Key packages include:
+- fastmcp==2.9.2
+- mcp==1.9.4
+- pydantic[email]==2.11.7
+- pydantic-settings==2.5.2
+- ollama==0.5.1
+- fastapi==0.115.9
+- uvicorn[standard]==0.30.6
+- faiss-cpu==1.11.0
+- sentence-transformers==4.1.0
+- jedi==0.19.2
+- chromadb==1.0.5
+- onnxruntime==1.21.1
+- numpy==2.3.1
+- tokenizers==0.21.1
+- pylint==3.2.2
+- mypy==1.16.1
+- bandit==1.8.5
+- vulture==2.11
+- radon==6.0.1
+- libcst==1.2.0
+- rich==14.0.0
+- typer==0.15.2
+- python-dotenv==1.1.0
+- requests==2.32.3
+
+All dependencies are up-to-date as of July 2025. For GPU support, see the torch install instructions in `requirements.txt`.
+
 ## Windsurf IDE Configuration
 
-To use Kinesis Multitools within the Windsurf IDE, you need to configure it in your `mcp_config.json` file. This tells the IDE how to launch and communicate with the tool server.
-
-Add the following entry to the `mcpServers` object in your configuration file:
+Configure the MCP server in your `mcp_config.json`:
 
 ```json
 "kinesis_multitools": {
@@ -45,19 +72,47 @@ Add the following entry to the `mcpServers` object in your configuration file:
 }
 ```
 
-**Note:** Make sure the `command` path points to the `fastmcp.exe` executable inside your project's virtual environment (`.venv`). Adjust the path if your project is located elsewhere.
-
-After saving the configuration, restart the Windsurf IDE for the changes to take effect.
+**Note:** Ensure the `command` path points to the correct `fastmcp.exe` in your `.venv`.
 
 ## Usage
 
-Run the server from the command line:
+To run the server:
 
 ```bash
 python src/toolz.py
 ```
 
 The server will start on `http://localhost:8000`.
+
+## Supported Tools
+
+- `index_project_files`: Incremental semantic indexing for search.
+- `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification).
+- `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
+- File read/list utilities.
+
+**Removed tools:**
+- The legacy `analyze` and `edit` tools have been removed for stability. Only the tools above are supported in this release.
+
+For details on tool usage and extension, see `tooldevguide.md`.
+
+---
+
+## Canonical Patterns in the Cookbook
+
+The following key patterns from `src/toolz.py` are now available in the project Cookbook for rapid reuse and code consistency. Use the `cookbook_multitool` to search for or add these patterns to new projects:
+
+| Pattern Name                       | Function Name                | Description                                                                                       |
+|------------------------------------|------------------------------|---------------------------------------------------------------------------------------------------|
+| secure_project_file_listing        | list_project_files           | Canonical function for recursively listing files in a project, with robust filtering and validation.|
+| safe_file_read_with_validation     | read_project_file            | Safely reads a file, enforcing project root constraints and handling text/binary content.          |
+| incremental_vector_indexing        | index_project_files          | Efficiently indexes project files for semantic search, only embedding changed/added files.         |
+| multimodal_search_dispatch         | unified_search               | Unified entrypoint for multi-modal codebase search with robust error handling.                     |
+| process_timeout_and_error_decorator| tool_process_timeout_and_errors | Decorator for process-based timeout and error handling for MCP tools.                              |
+| thread_timeout_and_error_decorator | tool_timeout_and_errors      | Decorator for thread-based timeout and error handling for MCP tools.                               |
+| secure_path_validation             | _is_safe_path                | Validates that a path is within the configured project root(s), preventing unauthorized access.    |
+| batch_embedding_with_lazy_model    | _embed_batch                 | Batch embedding logic with lazy model loading and device selection.                                |
+
 
 ### Indexing the Project
 

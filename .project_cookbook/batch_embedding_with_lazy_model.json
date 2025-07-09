@@ -1,0 +1,8 @@
+{
+    "pattern_name": "batch_embedding_with_lazy_model",
+    "description": "Encodes a batch of texts into vector embeddings, lazily loading the SentenceTransformer model only when needed and selecting the appropriate device (CPU/GPU).",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_embed_batch",
+    "source_code": "def _embed_batch(texts: list[str]) -> list[list[float]]:\n    \"\"\"Encodes a batch of texts into vector embeddings using the lazily-loaded model.\"\"\"\n    if not LIBS_AVAILABLE:\n        raise RuntimeError(\"Embedding libraries (torch, sentence-transformers) are not available.\")\n    model = _get_st_model()\n    logger.info(f\"Embedding a batch of {len(texts)} texts on {DEVICE}...\")\n    with torch.no_grad():\n        return model.encode(texts, batch_size=32, show_progress_bar=False, device=DEVICE).tolist()",
+    "added_at_utc": "2025-07-09T04:18:38Z"
+}
