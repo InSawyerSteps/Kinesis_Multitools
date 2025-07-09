@@ -176,6 +176,19 @@ class BatchEditRequest(BaseModel):
     edits: List[EditOperation]
     preview_only: bool = False
 
+class SuggestTestsRequest(BaseModel):
+    file_path: str = Field(..., description="The absolute path to the file containing the function.")
+    function_name: str = Field(..., description="The name of the function to generate tests for.")
+
+class AddToCookbookRequest(BaseModel):
+    pattern_name: str = Field(..., description="A unique, file-safe name for the pattern (e.g., 'standard_error_handler').")
+    file_path: str = Field(..., description="The absolute path to the file containing the reference function.")
+    function_name: str = Field(..., description="The name of the reference function to save as a pattern.")
+    description: str = Field(..., description="A clear, one-sentence description of what this pattern does and when to use it.")
+
+class FindInCookbookRequest(BaseModel):
+    query: str = Field(..., description="A natural language query to search for a relevant code pattern.")
+
 # --- End of new imports and models ---
 
 # --- Dependency Imports ---
@@ -1028,254 +1041,244 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
     else:
         return {"status": "error", "message": "Invalid search type specified."}
 
+# Tool 4: Test Generation
 # ---------------------------------------------------------------------------
-# Tool 3: The /analyze Multitool
-# ---------------------------------------------------------------------------
-@tool_process_timeout_and_errors(timeout=60)
 @mcp.tool()
-def analyze(request: AnalysisRequest) -> dict:
+@tool_process_timeout_and_errors(timeout=180)  # Give it a longer timeout for LLM calls
+def suggest_tests(request: SuggestTestsRequest) -> Dict[str, Any]:
     """
-    Run static analyses on files or directories (quality, types, security, dead code, complexity, TODOs).
-    This tool enforces a 60-second hard timeout and robust error handling using a separate process.
-    If the tool fails or times out, it returns a structured MCP error response.
+    Generates boilerplate unit tests for a given function using AI.
+
+    This tool performs the following steps:
+    1.  Uses 'ast' search to find the function's source code and definition location.
+    2.  Uses 'references' search to find examples of how the function is used.
+    3.  Passes the function's source, usage examples, and context to an LLM.
+    4.  Returns a pytest-compatible code block as a string.
 
     Args:
-        request (AnalysisRequest):
-            - path (str): File or directory to analyze
-            - analyses (List[str]): Which analyses to run. Allowed: 'quality', 'types', 'security', 'dead_code', 'complexity', 'todos'.
+        request (SuggestTestsRequest): The request containing the file path and function name.
 
     Returns:
-        dict: {
-            'status': 'success'|'error',
-            'results': Dict[str, Any],
-            'message': str
-        }
-    Usage:
-        analyze({"path": "foo.py", "analyses": ["quality", "types"]})
-        analyze({"path": "src/", "analyses": ["dead_code", "complexity"]})
-        analyze({"path": "src/", "analyses": ["audit_package_versions"]})
-        analyze({"path": "src/", "analyses": ["check_licenses"]})
+        Dict[str, Any]: A dictionary containing the status and the generated test code, or an error message.
     """
-    logger.info(f"[analyze] path={request.path} analyses={request.analyses}")
-    results = {}
-    path = pathlib.Path(request.path)
-    if not _is_safe_path(path):
-        return {"status": "error", "message": "Unsafe path."}
-        return {"status": "error", "results": {}, "message": "Unsafe path."}
-    if not path.exists():
-        return {"status": "error", "results": {}, "message": "Path does not exist."}
+    logger.info(f"[suggest_tests] Received request for {request.function_name} in {request.file_path}")
+
+    # --- Step 1: Find function definition using AST search ---
+    ast_search_request = SearchRequest(
+        project_name="MCP-Server",
+        search_type="ast",
+        query=request.function_name,
+        params={"includes": [request.file_path], "target_node_type": "function", "max_results": 1}
+    )
+    ast_results = unified_search(ast_search_request)
+
+    if ast_results.get("status") != "success" or not ast_results.get("results"):
+        return {"status": "error", "message": f"AST search failed to find function '{request.function_name}'.", "details": ast_results.get("message")}
+
+    target_function_def = ast_results["results"][0]
+    function_source_code = target_function_def.get("content", "")
+    definition_location = {"file_path": target_function_def.get("file_path"), "line": target_function_def.get("line_number"), "column": 0}
+
+    # --- Step 2: Find function references ---
+    references_search_request = SearchRequest(project_name="MCP-Server", search_type="references", query=request.function_name, params=definition_location)
+    references_results = unified_search(references_search_request)
+    usage_examples = references_results.get("results", [])
+
+    # --- Step 3: Call Ollama LLM to generate tests ---
+    try:
+        import ollama
+    except ImportError:
+        return {"status": "error", "message": "The 'ollama' package is not installed. Please install it with 'pip install ollama'."}
+
+    prompt = f"""You are a senior Python developer. Your task is to write a concise, correct, and isolated pytest unit test for the following function.
+
+Function Source Code from {definition_location['file_path']}:
+```python
+{function_source_code}
+```
+
+Here are some examples of how this function is used elsewhere in the codebase:
+"""
+    for example in usage_examples[:3]: # Limit to 3 examples
+        prompt += f"\n- In `{example.get('file_path')}` at line {example.get('line')}:\n  `{example.get('code')}`"
+    prompt += """\n\nBased on the function's source and its usage, write a complete, runnable pytest test file. The test file should include all necessary imports.
+
+IMPORTANT: Provide only the raw Python code for the test file. Do not include any markdown formatting like ```python or any explanations. Your output should be ready to be written directly to a _test.py file."""
 
     try:
-        for analysis in request.analyses:
-            if analysis == "quality":
-                if pylint_run is None:
-                    results["quality"] = "pylint not installed"
-                else:
-                    logger.info(f"[analyze] Running pylint on {path}")
-                    try:
-                        import sys
-                        venv_scripts = os.path.dirname(sys.executable)
-                        if sys.platform == 'win32':
-                            pylint_exec = 'pylint.exe'
-                        else:
-                            pylint_exec = 'pylint'
-                        pylint_path = os.path.join(venv_scripts, pylint_exec)
-                        logger.info(f"[analyze] Using pylint at: {pylint_path}")
-                        try:
-                            pylint_output = subprocess.run([
-                                pylint_path, str(path)
-                            ], capture_output=True, text=True, timeout=60)
-                            results["quality"] = pylint_output.stdout
-                        except subprocess.TimeoutExpired:
-                            logger.error(f"[analyze] pylint timed out on {path}")
-                            results["quality"] = "pylint timed out after 60 seconds."
-                        except Exception as e:
-                            results["quality"] = f"pylint error: {e}"
-                    except Exception as e:
-                        results["quality"] = f"pylint error: {e}"
-            elif analysis == "types":
-                if mypy_api is None:
-                    results["types"] = "mypy not installed"
-                else:
-                    logger.info(f"[analyze] Running mypy on {path}")
-                    try:
-                        mypy_result = mypy_api.run([str(path)])
-                        results["types"] = mypy_result[0]
-                    except Exception as e:
-                        results["types"] = f"mypy error: {e}"
-            elif analysis == "security":
-                if bandit_manager is None or bandit_config is None:
-                    results["security"] = "bandit not installed"
-                else:
-                    logger.info(f"[analyze] Running bandit on {path}")
-                    try:
-                        conf = bandit_config.BanditConfig()
-                        mgr = bandit_manager.BanditManager(conf, "file")
-                        mgr.discover_files([str(path)])
-                        mgr.run_tests()
-                        # Convert Bandit issues to dicts, compatibly for all Bandit versions
-                        try:
-                            issues = mgr.get_issue_list(sev_filter=None, conf_filter=None)
-                        except TypeError as te:
-                            logger.warning(f"[analyze] Bandit get_issue_list() does not accept sev_filter/conf_filter: {te}. Retrying without arguments.")
-                            issues = mgr.get_issue_list()
-                        results["security"] = [issue.as_dict() if hasattr(issue, 'as_dict') else str(issue) for issue in issues]
-                    except Exception as e:
-                        results["security"] = f"bandit error: {e}"
-            elif analysis == "dead_code":
-                if Vulture is None:
-                    results["dead_code"] = "vulture not installed"
-                else:
-                    logger.info(f"[analyze] Running vulture on {path}")
-                    try:
-                        v = Vulture()
-                        v.scavenge([str(path)])
-                        # Vulture returns a list of Item objects; convert them to dicts
-                        unused = v.get_unused_code()
-                        results["dead_code"] = [item.__dict__ if hasattr(item, '__dict__') else str(item) for item in unused]
-                    except Exception as e:
-                        results["dead_code"] = f"vulture error: {e}"
-            elif analysis == "complexity":
-                if not RADON_AVAILABLE:
-                    results["complexity"] = "radon not installed"
-                else:
-                    try:
-                        logger.info(f"[analyze] Running radon cyclomatic complexity on {request.path}")
-                        config = Config()
-                        harvester = CCHarvester(config, [request.path])
-                        complexity_results = harvester.results
-                        # Optionally filter by rank here if needed
-                        results["complexity"] = complexity_results
-                    except Exception as e:
-                        logger.error(f"[analyze] radon error: {e}")
-                        results["complexity"] = f"radon error: {e}"
-                        results["complexity"] = f"radon error: {e}"
-            elif analysis == "todos":
-                logger.info(f"[analyze] Scanning for TODOs in {path}")
-                try:
-                    todos = []
-                    if path.is_file():
-                        with path.open("r", encoding="utf-8", errors="ignore") as f:
-                            for i, line in enumerate(f, 1):
-                                if "TODO" in line:
-                                    todos.append({"line": i, "text": line.strip()})
-                    else:
-                        for file in path.rglob("*.py"):
-                            with file.open("r", encoding="utf-8", errors="ignore") as f:
-                                for i, line in enumerate(f, 1):
-                                    if "TODO" in line:
-                                        todos.append({"file": str(file), "line": i, "text": line.strip()})
-                    results["todos"] = todos
-                except Exception as e:
-                    results["todos"] = f"TODO scan error: {e}"
-            elif analysis == "check_licenses":
-                try:
-                    license_req = CheckLicensesRequest()
-                    results["check_licenses"] = check_licenses(license_req)
-                except Exception as e:
-                    results["check_licenses"] = f"check_licenses error: {e}"
-            else:
-                results[analysis] = f"Unknown analysis: {analysis}"
-        return {"status": "success", "results": results, "message": "Analysis complete."}
+        logger.info(f"[suggest_tests] Sending prompt to Ollama model '{OLLAMA_MODEL_FOR_TESTS}'...")
+        response = ollama.chat(
+            model=OLLAMA_MODEL_FOR_TESTS,
+            messages=[{'role': 'user', 'content': prompt}],
+            options={'temperature': 0.1}
+        )
+        generated_test_code = response['message']['content']
+        return {"status": "success", "generated_test_code": generated_test_code.strip()}
     except Exception as e:
-        logger.error(f"[analyze] error: {e}", exc_info=True)
-# Tool 4: The /edit Multitool
+        logger.error(f"[suggest_tests] Ollama API call failed: {e}")
+        return {"status": "error", "message": f"An error occurred while calling the local Ollama API: {e}. Is the Ollama server running?"}
+
 # ---------------------------------------------------------------------------
-@tool_process_timeout_and_errors(timeout=60)
+# Tool 5 & 6: The Code Cookbook
+# ---------------------------------------------------------------------------
+COOKBOOK_DIR_NAME = ".project_cookbook"
+
+class CookbookMultitoolRequest(BaseModel):
+    mode: str = Field(..., description="Operation mode: 'add' or 'find'.")
+    # For 'add' mode
+    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add').")
+    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add').")
+    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add').")
+    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add').")
+    # For 'find' mode
+    query: Optional[str] = Field(None, description="Search query for finding patterns (required for 'find').")
+
+def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
+    logger.info(f"[add_to_cookbook] Adding pattern '{request.pattern_name}' from {request.file_path}::{request.function_name}")
+    project_path = _get_project_path("MCP-Server")
+    if not project_path:
+        return {"status": "error", "message": "Project 'MCP-Server' not found."}
+    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    cookbook_dir.mkdir(exist_ok=True)
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    output_path = cookbook_dir / safe_filename
+    if output_path.exists():
+        return {"status": "error", "message": f"Pattern '{request.pattern_name}' already exists at {output_path}"}
+    source_file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(source_file_path):
+        return {"status": "error", "message": "Access denied: Source file path is outside configured project roots."}
+    if not source_file_path.is_file():
+        return {"status": "error", "message": f"Source file not found at: {request.file_path}"}
+    try:
+        source_code_text = source_file_path.read_text("utf-8")
+        tree = ast.parse(source_code_text)
+        class FunctionFinder(ast.NodeVisitor):
+            def __init__(self, target_name):
+                self.target_name = target_name
+                self.found_node = None
+            def visit_FunctionDef(self, node):
+                if node.name == self.target_name:
+                    self.found_node = node
+                self.generic_visit(node)
+        finder = FunctionFinder(request.function_name)
+        finder.visit(tree)
+        if not finder.found_node:
+            return {"status": "error", "message": f"Could not find function '{request.function_name}' in '{request.file_path}'."}
+        function_source = ast.get_source_segment(source_code_text, finder.found_node)
+        if not function_source:
+             return {"status": "error", "message": f"Could not extract source for function '{request.function_name}'."}
+    except Exception as e:
+        logger.error(f"[add_to_cookbook] AST parsing failed for {request.file_path}: {e}")
+        return {"status": "error", "message": f"Failed to parse or read source file: {e}"}
+    pattern_data = {
+        "pattern_name": request.pattern_name,
+        "description": request.description,
+        "source_file": request.file_path,
+        "function_name": request.function_name,
+        "source_code": function_source,
+        "added_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(pattern_data, f, indent=4)
+        logger.info(f"[add_to_cookbook] Successfully saved pattern to {output_path}")
+        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was successfully added to the cookbook."}
+    except Exception as e:
+        logger.error(f"[add_to_cookbook] Failed to write pattern file {output_path}: {e}")
+        return {"status": "error", "message": f"Failed to write pattern file: {e}"}
+
+def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
+    logger.info(f"[find_in_cookbook] Searching for pattern with query: '{request.query}'")
+    project_path = _get_project_path("MCP-Server")
+    if not project_path:
+        return {"status": "error", "message": "Project 'MCP-Server' not found."}
+    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    if not cookbook_dir.is_dir():
+        return {"status": "not_found", "message": "Cookbook directory does not exist. Add a pattern first."}
+    matches = []
+    query_lower = request.query.lower()
+    for pattern_file in cookbook_dir.glob("*.json"):
+        try:
+            with open(pattern_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            searchable_text = f"{data.get('pattern_name', '')} {data.get('description', '')} {data.get('function_name', '')}".lower()
+            if query_lower in searchable_text:
+                matches.append(data)
+        except Exception as e:
+            logger.warning(f"[find_in_cookbook] Could not read or parse pattern file {pattern_file}: {e}")
+            continue
+    if not matches:
+        return {"status": "not_found", "message": f"No patterns found matching the query: '{request.query}'"}
+    return {"status": "success", "results": matches}
+
 @mcp.tool()
-def edit(request: BatchEditRequest) -> dict:
+@tool_timeout_and_errors(timeout=30)
+def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     """
-    Perform batch code edits (replace, insert, delete) with preview/diff support.
-    This tool enforces a hard timeout and robust error handling using a separate process.
+    Unified Code Cookbook multitool for adding and searching code patterns.
 
     Args:
-        request (BatchEditRequest):
-            - file_path (str): File to edit
-            - edits (List[EditOperation]): List of edit operations to apply
-            - preview_only (bool): If True, only preview/diff changes, do not write
+        request (CookbookMultitoolRequest):
+            - mode (str): 'add' to save a new pattern, 'find' to search for patterns.
+            - pattern_name (str, required for 'add'): Unique name for the pattern.
+            - file_path (str, required for 'add'): Absolute path to the file containing the function.
+            - function_name (str, required for 'add'): Name of the function to save.
+            - description (str, required for 'add'): Description of the pattern.
+            - query (str, required for 'find'): Search query for finding patterns.
 
     Returns:
-        dict: {
-            'status': 'success'|'error',
-            'preview': bool,
-            'diff': str (if preview),
-            'modified_content': str (if preview),
-            'message': str
-        }
+        dict: Status and results or error message.
+
     Usage:
-        edit({"file_path": "foo.py", "edits": [{"operation": "replace_block", ...}], "preview_only": true})
+        - To add: mode='add', pattern_name, file_path, function_name, description
+        - To find: mode='find', query
     """
-    import difflib
-    logger.info(f"[edit] file_path={request.file_path} preview_only={request.preview_only}")
-    target_path = pathlib.Path(request.file_path)
-    if not _is_safe_path(target_path):
-        logger.error(f"[edit] Unsafe path: {target_path}")
-        return {"status": "error", "message": "Unsafe path."}
-    if not target_path.is_file():
-        logger.error(f"[edit] File not found: {target_path}")
-        return {"status": "error", "message": "File not found."}
-    try:
-        original_content = target_path.read_text("utf-8")
-        modified_content = original_content
-        for edit_op in request.edits:
-            op = edit_op.operation
-            params = edit_op.params
-            logger.info(f"[edit] op={op} params={params}")
-            if op == "replace_block":
-                old = params.get("old")
-                new = params.get("new")
-                if old is None or new is None:
-                    raise ValueError("replace_block requires 'old' and 'new' params")
-                modified_content = modified_content.replace(old, new)
-            elif op == "insert_at":
-                idx = params.get("index")
-                text = params.get("text")
-                if idx is None or text is None:
-                    raise ValueError("insert_at requires 'index' and 'text' params")
-                lines = modified_content.splitlines(keepends=True)
-                if not (0 <= idx <= len(lines)):
-                    raise ValueError(f"insert_at index out of range: {idx}")
-                lines.insert(idx, text if text.endswith("\n") else text + "\n")
-                modified_content = "".join(lines)
-            elif op == "delete_block":
-                block = params.get("block")
-                if block is None:
-                    raise ValueError("delete_block requires 'block' param")
-                modified_content = modified_content.replace(block, "")
-            else:
-                logger.error(f"[edit] Unsupported operation: {op}")
-                return {"status": "error", "message": f"Unsupported operation: {op}"}
-        if request.preview_only:
-            diff = "".join(difflib.unified_diff(
-                original_content.splitlines(keepends=True),
-                modified_content.splitlines(keepends=True),
-                fromfile=f"a/{request.file_path}",
-                tofile=f"b/{request.file_path}",
-            ))
-            logger.info(f"[edit] Preview diff generated.")
-            return {
-                "status": "success",
-                "preview": True,
-                "diff": diff,
-                "modified_content": modified_content
-            }
-        else:
-            target_path.write_text(modified_content, "utf-8")
-            logger.info(f"[edit] Applied {len(request.edits)} edits to {target_path}")
-            return {
-                "status": "success",
-                "preview": False,
-                "message": f"Successfully applied {len(request.edits)} edits to '{request.file_path}'."
-            }
-    except Exception as e:
-        logger.error(f"[edit] Transaction failed for file '{request.file_path}': {e}", exc_info=True)
-        return {"status": "error", "message": f"Edit failed: {e}"}
-    # entry point for application startup.
-    multiprocessing.freeze_support() # For pyinstaller compatibility
-    logger.info("[MCP SERVER START] Starting server...")
-    if not LIBS_AVAILABLE:
-        logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
-        logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")
+    logger.info(f"[cookbook_multitool] mode={request.mode}")
+    if request.mode == "add":
+        missing = [f for f in ["pattern_name", "file_path", "function_name", "description"] if getattr(request, f) is None]
+        if missing:
+            return {"status": "error", "message": f"Missing required fields for 'add': {', '.join(missing)}"}
+        add_req = AddToCookbookRequest(
+            pattern_name=request.pattern_name,
+            file_path=request.file_path,
+            function_name=request.function_name,
+            description=request.description
+        )
+        return _add_to_cookbook_impl(add_req)
+    elif request.mode == "find":
+        if not request.query:
+            return {"status": "error", "message": "Missing 'query' for 'find' mode."}
+        find_req = FindInCookbookRequest(query=request.query)
+        return _find_in_cookbook_impl(find_req)
     else:
-        logger.info("Starting MCP Server...")
-        mcp.run(transport="sse", port=8000)
+        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=30)
+def add_to_cookbook(request: AddToCookbookRequest) -> dict:
+    """
+    [DEPRECATED: Use 'cookbook_multitool' instead.]
+    Saves a function's source code as a 'golden pattern' in the project's Code Cookbook.
+
+    Args:
+        request (AddToCookbookRequest): The request containing the pattern name, source location, and description.
+
+    Returns:
+        A dictionary with the status of the operation.
+    """
+    return _add_to_cookbook_impl(request)
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=30)
+def find_in_cookbook(request: FindInCookbookRequest) -> dict:
+    """
+    [DEPRECATED: Use 'cookbook_multitool' instead.]
+    Searches the Code Cookbook for a relevant code pattern.
+
+    Args:
+        request (FindInCookbookRequest): The request containing the natural language search query.
+
+    Returns:
+        A dictionary containing the search results.
+    """
+    return _find_in_cookbook_impl(request)

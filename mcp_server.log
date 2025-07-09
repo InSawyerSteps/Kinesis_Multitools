@@ -1,0 +1,46 @@
+2025-07-07 00:47:11,122 - INFO - [26252] - Logging configured. Log file at: C:\Projects\MCP Server\mcp_server.log
+2025-07-07 00:47:11,123 - INFO - [26252] - [MCP SERVER IMPORT] Importing src/toolz.py and initializing FastMCP instance...
+2025-07-07 00:47:11,138 - INFO - [26252] - Starting MCP server 'MCP-Server' with transport 'stdio'
+2025-07-07 00:47:11,147 - INFO - [26252] - Processing request of type ListToolsRequest
+2025-07-07 00:47:36,238 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 00:47:36,238 - INFO - [26252] - [analyze v2] path=c:\Projects\MCP Server\src\toolz.py analyses=['quality', 'security', 'todos']
+2025-07-07 00:47:36,239 - INFO - [26252] - [analyze v2] Running 'quality' analysis via subprocess...
+2025-07-07 00:49:36,251 - ERROR - [26252] - [analyze:subprocess] Command 'C:\Projects\MCP Server\.venv\Scripts\python.exe' timed out after 120s.
+2025-07-07 00:49:36,251 - INFO - [26252] - [analyze v2] Finished 'quality' analysis.
+2025-07-07 00:49:36,251 - INFO - [26252] - [analyze v2] Running 'security' analysis via subprocess...
+2025-07-07 00:51:36,272 - ERROR - [26252] - [analyze:subprocess] Command 'C:\Projects\MCP Server\.venv\Scripts\python.exe' timed out after 120s.
+2025-07-07 00:51:36,272 - INFO - [26252] - [analyze v2] Finished 'security' analysis.
+2025-07-07 00:51:36,272 - INFO - [26252] - [analyze v2] Running 'todos' analysis via subprocess...
+2025-07-07 01:00:24,462 - INFO - [26252] - [analyze v2] Finished 'todos' analysis.
+2025-07-07 01:00:24,464 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:00:31,578 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:00:31,579 - INFO - [26252] - [list_files] project=MCP-Server extensions=['py']
+2025-07-07 01:00:32,792 - INFO - [26252] - [list_files] Found 4 paths.
+2025-07-07 01:00:40,150 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:00:46,901 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:00:52,196 - INFO - [26252] - [index] Found 14 relevant files to consider.
+2025-07-07 01:00:52,249 - INFO - [26252] - [index] Loaded previous metadata with 336 chunks.
+2025-07-07 01:00:52,250 - INFO - [26252] - [index] unchanged=10 updated=4 deleted=0
+2025-07-07 01:00:52,251 - INFO - [26252] - [Lazy Load] Loading sentence-transformer model 'all-MiniLM-L6-v2' onto device 'cuda'...
+2025-07-07 01:00:52,253 - INFO - [26252] - Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+2025-07-07 01:00:54,064 - INFO - [26252] - [Lazy Load] Model loaded successfully.
+2025-07-07 01:00:54,065 - INFO - [26252] - Embedding a batch of 128 texts on cuda...
+2025-07-07 01:00:54,358 - INFO - [26252] - [index] Embedded batch of 128 chunks. Total chunks so far: 292
+2025-07-07 01:00:54,358 - INFO - [26252] - Embedding a batch of 45 texts on cuda...
+2025-07-07 01:00:54,397 - INFO - [26252] - [index] Embedded batch of 45 chunks. Total chunks so far: 337
+2025-07-07 01:01:00,045 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:01:00,045 - INFO - [26252] - [search] type='keyword' project='MCP-Server' q='FastMCP...'
+2025-07-07 01:01:10,577 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:01:10,577 - INFO - [26252] - [search] type='semantic' project='MCP-Server' q='error handling decorator...'
+2025-07-07 01:01:10,628 - INFO - [26252] - Embedding a batch of 1 texts on cuda...
+2025-07-07 01:01:18,058 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:01:18,058 - INFO - [26252] - [search] type='ast' project='MCP-Server' q='unified_search...'
+2025-07-07 01:01:18,081 - INFO - [26252] - [AST] Found potential function match: unified_search
+2025-07-07 01:01:19,348 - INFO - [26252] - [AST] Found potential function match: unified_search
+2025-07-07 01:01:28,309 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:05:58,720 - INFO - [26252] - [search] type='references' project='MCP-Server' q='unified_search...'
+2025-07-07 01:05:59,312 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:05:59,312 - INFO - [26252] - [search] type='references' project='MCP-Server' q='unified_search...'
+2025-07-07 01:05:59,508 - INFO - [26252] - Processing request of type CallToolRequest
+2025-07-07 01:05:59,508 - INFO - [26252] - [search] type='references' project='MCP-Server' q='unified_search...'
+2025-07-07 01:06:00,725 - ERROR - [26252] - Failed to run server: unhandled errors in a TaskGroup (2 sub-exceptions)

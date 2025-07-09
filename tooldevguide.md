@@ -1,5 +1,67 @@
 # MCP Server Next-Gen Tool Development Guide
 
+> **Supported MCP Tools (2025-07-07):**
+>
+> - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
+> - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+> - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
+> - File read/list utilities.
+>
+> **Removed tools:**
+> - `analyze` and `edit` tools have been removed due to architectural limitations and instability. They are not present in this release. Future analysis or edit tools must be asynchronous, library-based, and robustly tested before inclusion.
+
+---
+
+## Code Cookbook Multitool (`cookbook_multitool`)
+
+The `cookbook_multitool` is a unified endpoint for capturing and searching canonical code patterns ("golden patterns") in your project. It supersedes the old `add_to_cookbook` and `find_in_cookbook` tools.
+
+### Purpose
+- **Add** a function's source and metadata to the project cookbook for future reuse and code consistency.
+- **Find** patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
+
+### Request Schema
+- `mode` (`str`): Either `"add"` or `"find"`. Required.
+- For `add` mode:
+    - `pattern_name` (`str`): Unique name for the pattern. Required.
+    - `file_path` (`str`): Absolute path to the file containing the function. Required.
+    - `function_name` (`str`): Name of the function to save. Required.
+    - `description` (`str`): Description of the pattern. Required.
+- For `find` mode:
+    - `query` (`str`): Search query for finding patterns. Required.
+
+### Example Usage
+
+#### Add a Pattern
+```json
+{
+  "mode": "add",
+  "pattern_name": "My Golden Pattern",
+  "file_path": "C:/Projects/MCP Server/src/toolz.py",
+  "function_name": "_is_safe_path",
+  "description": "A canonical function for secure path validation."
+}
+```
+
+#### Find a Pattern
+```json
+{
+  "mode": "find",
+  "query": "secure path"
+}
+```
+
+### Response
+- On success, returns a status and message (for add), or a list of matching patterns (for find).
+- Cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
+
+### Best Practices
+- Use descriptive, unique pattern names to avoid collisions.
+- Store only canonical, well-tested functions as cookbook patterns.
+- Use the find mode to enforce code consistency and accelerate onboarding.
+
+See the README for a summary and user-facing instructions.
+
 ## Overview
 This guide is your blueprint for extending `toolz.py` with advanced, multi-command "mega-tools" for the MCP Server. It covers:
 - Authoring style and architecture

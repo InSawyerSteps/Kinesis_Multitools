@@ -4,9 +4,9 @@ Kinesis Multitools is a powerful, local-first server providing a suite of advanc
 
 ## Key Features
 
-- **Tool Reliability**: All core MCP tools (index, search, edit, file read/list) are robust and respond within hard timeouts. However, the `analyze` tool is currently unreliable and may hang or fail to return results. Further debugging is required for this tool.
+- **Tool Reliability**: The supported MCP tools—`index_project_files`, `search` (all modes), and file read/list—are robust and respond within hard timeouts. The previous `analyze` and `edit` tools have been removed due to architectural limitations and instability. Only the tools documented below are supported.
 - **Reliable by Design** – All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
-- **Multitool Architecture** – A single, unified `/search` endpoint provides access to multiple search modes.
+- **Multitool Architecture** – A single, unified `/search` endpoint provides access to multiple search modes. Only the documented search subtools are supported.
 - **Advanced Search Modes**
   - `keyword` – fast literal text search.
   - `semantic` – natural language, concept-based code search.
@@ -139,7 +139,53 @@ Content-Type: application/json
 
 ## Roadmap
 
-Kinesis Multitools is actively expanding. Future updates will introduce new tools for advanced static analysis, lossless code refactoring, automated code generation and project management.
+Kinesis Multitools is actively expanding. Future updates may introduce new tools for advanced static analysis and automated code modification, but only after robust, asynchronous, and library-based architectures are proven stable. The current supported toolset is:
+
+- `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
+- `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+- `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
+- File read/list utilities.
+
+The `analyze` and `edit` tools are not present in this release.
+
+---
+
+## Code Cookbook Multitool
+
+The `cookbook_multitool` is a unified endpoint for capturing and searching canonical code patterns ("golden patterns") in your project. It replaces the older `add_to_cookbook` and `find_in_cookbook` tools.
+
+### Purpose
+- **Add** a function's source and metadata to the project cookbook for future reuse and consistency.
+- **Find** patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
+
+### Usage
+
+Send a request to `/cookbook_multitool` with the desired `mode`:
+
+#### Add a Pattern
+```json
+{
+  "mode": "add",
+  "pattern_name": "My Golden Pattern",
+  "file_path": "C:/Projects/MCP Server/src/toolz.py",
+  "function_name": "_is_safe_path",
+  "description": "A canonical function for secure path validation."
+}
+```
+
+#### Find a Pattern
+```json
+{
+  "mode": "find",
+  "query": "secure path"
+}
+```
+
+### Response
+- On success, returns a status and message (for add), or a list of matching patterns (for find).
+- All cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
+
+See the developer guide for advanced usage and schema details.
 
 ## License
 
