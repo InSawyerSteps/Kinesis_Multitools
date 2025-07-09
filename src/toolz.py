@@ -179,6 +179,7 @@ class BatchEditRequest(BaseModel):
 class SuggestTestsRequest(BaseModel):
     file_path: str = Field(..., description="The absolute path to the file containing the function.")
     function_name: str = Field(..., description="The name of the function to generate tests for.")
+    model: Optional[str] = Field(None, description="(Optional) Ollama model to use for test generation. Overrides the default if set.")
 
 class AddToCookbookRequest(BaseModel):
     pattern_name: str = Field(..., description="A unique, file-safe name for the pattern (e.g., 'standard_error_handler').")
@@ -1043,84 +1044,17 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
 
 # Tool 4: Test Generation
 # ---------------------------------------------------------------------------
-@mcp.tool()
-@tool_process_timeout_and_errors(timeout=180)  # Give it a longer timeout for LLM calls
-def suggest_tests(request: SuggestTestsRequest) -> Dict[str, Any]:
-    """
-    Generates boilerplate unit tests for a given function using AI.
+# --- Ollama Model Selection for Test Generation ---
+import os
 
-    This tool performs the following steps:
-    1.  Uses 'ast' search to find the function's source code and definition location.
-    2.  Uses 'references' search to find examples of how the function is used.
-    3.  Passes the function's source, usage examples, and context to an LLM.
-    4.  Returns a pytest-compatible code block as a string.
+# Main and fallback models
+_OLLAMA_MAIN_MODEL = "goekdenizguelmez/JOSIEFIED-Qwen3:8b-deepseek-r1-0528"
+_OLLAMA_FALLBACK_MODEL = "qwen3:4b"
 
-    Args:
-        request (SuggestTestsRequest): The request containing the file path and function name.
+# Allow override via environment variable
+OLLAMA_MODEL_FOR_TESTS = os.environ.get("OLLAMA_MODEL_FOR_TESTS", _OLLAMA_MAIN_MODEL)
 
-    Returns:
-        Dict[str, Any]: A dictionary containing the status and the generated test code, or an error message.
-    """
-    logger.info(f"[suggest_tests] Received request for {request.function_name} in {request.file_path}")
-
-    # --- Step 1: Find function definition using AST search ---
-    ast_search_request = SearchRequest(
-        project_name="MCP-Server",
-        search_type="ast",
-        query=request.function_name,
-        params={"includes": [request.file_path], "target_node_type": "function", "max_results": 1}
-    )
-    ast_results = unified_search(ast_search_request)
-
-    if ast_results.get("status") != "success" or not ast_results.get("results"):
-        return {"status": "error", "message": f"AST search failed to find function '{request.function_name}'.", "details": ast_results.get("message")}
-
-    target_function_def = ast_results["results"][0]
-    function_source_code = target_function_def.get("content", "")
-    definition_location = {"file_path": target_function_def.get("file_path"), "line": target_function_def.get("line_number"), "column": 0}
-
-    # --- Step 2: Find function references ---
-    references_search_request = SearchRequest(project_name="MCP-Server", search_type="references", query=request.function_name, params=definition_location)
-    references_results = unified_search(references_search_request)
-    usage_examples = references_results.get("results", [])
-
-    # --- Step 3: Call Ollama LLM to generate tests ---
-    try:
-        import ollama
-    except ImportError:
-        return {"status": "error", "message": "The 'ollama' package is not installed. Please install it with 'pip install ollama'."}
-
-    prompt = f"""You are a senior Python developer. Your task is to write a concise, correct, and isolated pytest unit test for the following function.
-
-Function Source Code from {definition_location['file_path']}:
-```python
-{function_source_code}
-```
-
-Here are some examples of how this function is used elsewhere in the codebase:
-"""
-    for example in usage_examples[:3]: # Limit to 3 examples
-        prompt += f"\n- In `{example.get('file_path')}` at line {example.get('line')}:\n  `{example.get('code')}`"
-    prompt += """\n\nBased on the function's source and its usage, write a complete, runnable pytest test file. The test file should include all necessary imports.
-
-IMPORTANT: Provide only the raw Python code for the test file. Do not include any markdown formatting like ```python or any explanations. Your output should be ready to be written directly to a _test.py file."""
-
-    try:
-        logger.info(f"[suggest_tests] Sending prompt to Ollama model '{OLLAMA_MODEL_FOR_TESTS}'...")
-        response = ollama.chat(
-            model=OLLAMA_MODEL_FOR_TESTS,
-            messages=[{'role': 'user', 'content': prompt}],
-            options={'temperature': 0.1}
-        )
-        generated_test_code = response['message']['content']
-        return {"status": "success", "generated_test_code": generated_test_code.strip()}
-    except Exception as e:
-        logger.error(f"[suggest_tests] Ollama API call failed: {e}")
-        return {"status": "error", "message": f"An error occurred while calling the local Ollama API: {e}. Is the Ollama server running?"}
-
-# ---------------------------------------------------------------------------
-# Tool 5 & 6: The Code Cookbook
-# ---------------------------------------------------------------------------
+# === Code Cookbook Tools ===
 COOKBOOK_DIR_NAME = ".project_cookbook"
 
 class CookbookMultitoolRequest(BaseModel):
@@ -1252,33 +1186,3 @@ def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
         return _find_in_cookbook_impl(find_req)
     else:
         return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
-
-@mcp.tool()
-@tool_timeout_and_errors(timeout=30)
-def add_to_cookbook(request: AddToCookbookRequest) -> dict:
-    """
-    [DEPRECATED: Use 'cookbook_multitool' instead.]
-    Saves a function's source code as a 'golden pattern' in the project's Code Cookbook.
-
-    Args:
-        request (AddToCookbookRequest): The request containing the pattern name, source location, and description.
-
-    Returns:
-        A dictionary with the status of the operation.
-    """
-    return _add_to_cookbook_impl(request)
-
-@mcp.tool()
-@tool_timeout_and_errors(timeout=30)
-def find_in_cookbook(request: FindInCookbookRequest) -> dict:
-    """
-    [DEPRECATED: Use 'cookbook_multitool' instead.]
-    Searches the Code Cookbook for a relevant code pattern.
-
-    Args:
-        request (FindInCookbookRequest): The request containing the natural language search query.
-
-    Returns:
-        A dictionary containing the search results.
-    """
-    return _find_in_cookbook_impl(request)
