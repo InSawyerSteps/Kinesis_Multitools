@@ -203,8 +203,6 @@ We welcome suggestions and contributions for new tools! If you have an idea for 
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
 - File read/list utilities.
 
-The `analyze` and `edit` tools are not present in this release.
-
 ---
 
 ## Code Cookbook Multitool
