@@ -1,6 +1,6 @@
 # Kinesis Multitools
 
-Kinesis Multitools is a robust, local-first MCP server providing advanced tools for AI-driven software development. It is designed for integration with modern IDEs (like Windsurf) and empowers AI agents with comprehensive code intelligence, analysis, and search capabilities.
+Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code intelligence, semantic code search, and canonical code pattern management. Built for reliability and security, it enables both developers and AI agents to analyze, search, and interact with codebases efficiently—while remaining open to new tool ideas from the community.
 
 ## Key Features
 
@@ -194,7 +194,9 @@ Content-Type: application/json
 
 ## Roadmap
 
-Kinesis Multitools is actively expanding. Future updates may introduce new tools for advanced static analysis and automated code modification, but only after robust, asynchronous, and library-based architectures are proven stable. The current supported toolset is:
+**Roadmap & Community Involvement:**
+
+We welcome suggestions and contributions for new tools! If you have an idea for a code intelligence, search, or automation tool that would benefit the community, please open an issue or submit a pull request.
 
 - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
 - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
