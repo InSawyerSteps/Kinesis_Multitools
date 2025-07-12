@@ -33,3 +33,15 @@ rag_recruiting_mvp/data
 rag_recruiting_mvp/chroma_db_data_recruiting
 rag_recruiting_mvp/logs
 rag_recruiting_mvp/depe
+
+metadata.json
+index.faiss
+windsurf_search_index
+.windsurf
+indexing.md
+search.md
+cookbook.md
+fixall.md
+handoff.md
+.vscode
+tests
