@@ -8,7 +8,7 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
   - Uses `fastmcp==2.9.2` for maximum performance and compatibility (see `requirements.txt`).
 - **Supported MCP Tools:**
   - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-  - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+  - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
   - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
   - File read/list utilities: Safe listing and reading of project files.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
@@ -87,7 +87,7 @@ The server will start on `http://localhost:8000`.
 ## Supported Tools
 
 - `index_project_files`: Incremental semantic indexing for search.
-- `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification).
+- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification).
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
 - File read/list utilities.
 

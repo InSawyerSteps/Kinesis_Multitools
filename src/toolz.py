@@ -673,13 +673,12 @@ def index_project_files(project_name: str, subfolder: Optional[str] = None, max_
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: The Search Multitool
 # ---------------------------------------------------------------------------
 
 # --- Pydantic Model for the Unified Search Request ---
 class SearchRequest(BaseModel):
     search_type: Literal[
-        "keyword", "semantic", "ast", "references", "similarity", "task_verification"
+        "keyword", "regex", "semantic", "ast", "references", "similarity", "task_verification"
     ]
     query: str
     project_name: str
@@ -732,6 +731,75 @@ def _search_by_keyword(query: str, project_path: pathlib.Path, params: Dict) -> 
         "results": results,
         "files_scanned": files_scanned
     }
+
+def _search_by_regex(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
+    """
+    Search project files using a regular expression.
+
+    Params dictionary may contain:
+        - includes (List[str]): optional paths relative to project root
+        - extensions (List[str]): file extensions when includes is omitted
+        - ignore_case (bool)
+        - multiline (bool)
+        - dotall (bool)
+        - max_results (int, default 1000)
+    """
+    import logging
+    import re
+    logger = logging.getLogger("mcp_search_tools")
+    flags = 0
+    if params.get("ignore_case"):
+        flags |= re.IGNORECASE
+    if params.get("multiline"):
+        flags |= re.MULTILINE
+    if params.get("dotall"):
+        flags |= re.DOTALL
+
+    try:
+        pattern = re.compile(query, flags)
+    except re.error as exc:
+        return {"status": "error", "message": f"Invalid regex: {exc}"}
+
+    includes = params.get("includes")
+    extensions = params.get("extensions")
+    max_results = params.get("max_results", 1000)
+
+    # Build file list
+    if includes:
+        files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+    else:
+        files = list(_iter_files(project_path, extensions=extensions))
+
+    results = []
+    files_scanned = 0
+
+    for fp in files:
+        logger.debug(f"[regex] Scanning file: {fp}")
+        if ".windsurf_search_index" in str(fp):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, 1):
+                    for match in pattern.finditer(line):
+                        snippet = match.group(0)
+                        if len(snippet) > 200:
+                            snippet = snippet[:200] + "..."
+                        results.append({
+                            "file_path": str(fp),
+                            "line_number": lineno,
+                            "match": snippet,
+                        })
+                        if len(results) >= max_results:
+                            return {
+                                "status": "success",
+                                "results": results,
+                                "files_scanned": files_scanned + 1,
+                            }
+            files_scanned += 1
+        except Exception:
+            continue
+
+    return {"status": "success", "results": results, "files_scanned": files_scanned}
 
 def _search_by_semantic(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Performs semantic search using the FAISS index.
@@ -988,19 +1056,22 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
 @mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
-    Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
+    Multi-modal codebase search tool. Supports keyword, regex, semantic, AST, references, similarity, and task_verification modes.
     This tool enforces a hard timeout and robust error handling using a separate process.
     If the tool fails or times out, it returns a structured MCP error response.
 
     Args:
         request (SearchRequest):
-            - search_type (str): One of ['keyword', 'semantic', 'ast', 'references', 'similarity', 'task_verification'].
+            - search_type (str): One of ['keyword', 'regex', 'semantic', 'ast', 'references', 'similarity', 'task_verification'].
             - query (str): The search string or code snippet.
             - project_name (str): Name of the project as defined in PROJECT_ROOTS.
             - params (dict, optional):
                 - includes (List[str], optional): Restrict search to these files or folders.
                 - max_results (int, optional): Maximum number of results to return.
-                - extensions (List[str], optional): Filter files by extension (for 'keyword').
+                - extensions (List[str], optional): Filter files by extension (for 'keyword' and 'regex').
+                - ignore_case (bool): Case-insensitive regex search (for 'regex').
+                - multiline (bool): Multiline regex flag (for 'regex').
+                - dotall (bool): Dot matches newline (for 'regex').
                 - target_node_type (str, optional): 'function', 'class', or 'any' (for 'ast').
                 - file_path, line, column (for 'references').
 
@@ -1011,6 +1082,7 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
 
     Usage:
         - 'keyword': Fast literal search. Supports includes, extensions, max_results.
+        - 'regex': Advanced regex search. Supports includes, extensions, ignore_case, multiline, dotall, max_results.
         - 'semantic': Natural language/code search. Requires prior indexing. Supports includes, max_results.
         - 'ast': Find definitions by structure. Supports includes, target_node_type, max_results.
         - 'references': Find usages of a symbol. Supports includes, file_path, line, column, max_results.
@@ -1028,6 +1100,7 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
     # --- Router logic to call the correct internal search function ---
     search_functions = {
         "keyword": _search_by_keyword,
+        "regex": _search_by_regex,
         "semantic": _search_by_semantic,
         "ast": _search_by_ast,
         "references": _search_for_references,

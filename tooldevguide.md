@@ -3,7 +3,7 @@
 > **Supported MCP Tools (as of July 2025):**
 >
 > - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-> - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+> - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
 > - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
 > - File read/list utilities: Safe recursive listing and reading of project files.
 >
@@ -408,14 +408,15 @@ class ProjectRequest(BaseModel):
 ```python
 class SearchRequest(BaseModel):
     search_type: Literal[
-        "keyword", "semantic", "ast", "references", "similarity", "task_verification"
+        "keyword", "regex", "semantic", "ast", "references", "similarity", "task_verification"
     ]
     query: str
     params: Optional[Dict[str, Any]] = None
 ```
 
 **Subtool Logic:**
-- `keyword`: Regex/literal search across files
+- `keyword`: Literal search across files
+- `regex`: Advanced regex search across files
 - `semantic`: Embedding-based search (FAISS)
 - `ast`: AST-based structural search
 - `references`: Find symbol usages (Jedi or LibCST)
