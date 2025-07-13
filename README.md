@@ -10,6 +10,8 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
   - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
   - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
   - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
+  - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range. Supports extracting the full source of a named function or class (using AST), or any arbitrary line range. Returns a structured status, snippet content, and message. See below for usage details.
+  - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files. Supports modes for config file reading, structural outline, file statistics, and deep inspection of a function or class. Returns structured results for each mode. See below for usage details.
   - File read/list utilities: Safe listing and reading of project files.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
@@ -199,8 +201,10 @@ Content-Type: application/json
 We welcome suggestions and contributions for new tools! If you have an idea for a code intelligence, search, or automation tool that would benefit the community, please open an issue or submit a pull request.
 
 - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-- `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
+- `get_snippet`: Extract a function, class, or line range from any project file. See below for details.
+- `introspect`: Multi-modal code/project introspection for config, outline, stats, and inspect. See below for details.
 - File read/list utilities.
 
 ---
@@ -242,7 +246,108 @@ Send a request to `/cookbook_multitool` with the desired `mode`:
 
 See the developer guide for advanced usage and schema details.
 
+---
+
+## get_snippet Tool
+
+The `get_snippet` tool extracts a precise code snippet from a file by function, class, or line range.
+
+**Capabilities:**
+- Extract the full source of a named function (including decorators and signature)
+- Extract the full source of a named class (including decorators and signature)
+- Extract an arbitrary range of lines from any text file
+
+**Arguments:**
+- `file_path` (str): Absolute path to the file to extract from. Must be within the project root.
+- `mode` (str): Extraction mode. One of:
+    * `function`: Extract a named function by its name.
+    * `class`: Extract a named class by its name.
+    * `lines`: Extract a specific line range.
+- `name` (str, optional): Required for `function` and `class` modes. The name of the function or class to extract.
+- `start_line` (int, optional): Required for `lines` mode. 1-indexed starting line.
+- `end_line` (int, optional): Required for `lines` mode. 1-indexed ending line (inclusive).
+
+**Returns:**
+- `status` (str): 'success', 'error', or 'not_found'
+- `snippet` (str, optional): The extracted code snippet (if found)
+- `message` (str): Human-readable status or error message
+
+**Usage Examples:**
+```json
+{
+  "file_path": "/project/src/foo.py",
+  "mode": "function",
+  "name": "my_func"
+}
+```
+```json
+{
+  "file_path": "/project/src/foo.py",
+  "mode": "lines",
+  "start_line": 10,
+  "end_line": 20
+}
+```
+
+---
+
+## introspect Tool
+
+The `introspect` tool is a multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.
+
+**Modes:**
+- `config`: Reads project configuration files (pyproject.toml or requirements.txt).
+    * Args: config_type ('pyproject' or 'requirements').
+    * Returns: For 'pyproject', the full TOML text. For 'requirements', a list of package strings.
+- `outline`: Returns a high-level structural map of a Python file: all top-level functions and classes (with their methods).
+    * Args: file_path (str)
+    * Returns: functions (list), classes (list of {name, methods})
+- `stats`: Calculates basic file statistics: total lines, code lines, comment lines, file size in bytes.
+    * Args: file_path (str)
+    * Returns: total_lines (int), code_lines (int), comment_lines (int), file_size_bytes (int)
+- `inspect`: Provides details about a single function or class in a file: name, arguments/methods, docstring.
+    * Args: file_path (str), function_name (str, optional), class_name (str, optional)
+    * Returns: type ('function' or 'class'), name, args/methods, docstring
+
+**Arguments:**
+- `mode` (str): One of 'config', 'outline', 'stats', 'inspect'.
+- `file_path` (str, optional): Path to the file for inspection (required for all except config).
+- `config_type` (str, optional): 'pyproject' or 'requirements' for config mode.
+- `function_name` (str, optional): Name of function to inspect (for 'inspect' mode).
+- `class_name` (str, optional): Name of class to inspect (for 'inspect' mode).
+
+**Returns:**
+- `status` (str): 'success', 'error', or 'not_found'
+- `message` (str): Human-readable status or error message
+- Mode-specific fields:
+    - config: config_type, content (str) or packages (list)
+    - outline: functions (list), classes (list of {name, methods})
+    - stats: total_lines (int), code_lines (int), comment_lines (int), file_size_bytes (int)
+    - inspect: type, name, args/methods, docstring
+
+**Usage Examples:**
+```json
+{
+  "mode": "outline",
+  "file_path": "/project/src/foo.py"
+}
+```
+```json
+{
+  "mode": "inspect",
+  "file_path": "/project/src/foo.py",
+  "function_name": "my_func"
+}
+```
+```json
+{
+  "mode": "config",
+  "config_type": "requirements"
+}
+```
+
+---
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE.md](LICENSE.md) file for details.
-

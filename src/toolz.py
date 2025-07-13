@@ -77,29 +77,6 @@ from pydantic import BaseModel, Field
 import subprocess
 import difflib
 
-# Attempt to import new dependencies for /analyze and /edit tools
-try:
-    from pylint.lint import Run as pylint_run
-except ImportError:
-    pylint_run = None
-
-try:
-    from mypy import api as mypy_api
-except ImportError:
-    mypy_api = None
-
-try:
-    from bandit.core import manager as bandit_manager
-    from bandit.core import config as bandit_config
-except ImportError:
-    bandit_manager = None
-    bandit_config = None
-
-try:
-    from vulture import Vulture
-except ImportError:
-    Vulture = None
-
 try:
     print("\n=== DEBUG: Attempting to import radon ===")
     print("Searching for radon in:")
@@ -164,18 +141,6 @@ class AnalysisRequest(BaseModel):
     path: str
     analyses: List[Literal["quality", "types", "security", "dead_code", "complexity", "todos"]]
 
-class EditOperation(BaseModel):
-    operation: Literal[
-        "replace_block", "insert_at", "delete_block",  # Text-based
-        "rename_symbol", "add_docstring"              # LibCST-based
-    ]
-    params: Dict[str, Any]
-
-class BatchEditRequest(BaseModel):
-    file_path: str
-    edits: List[EditOperation]
-    preview_only: bool = False
-
 class SuggestTestsRequest(BaseModel):
     file_path: str = Field(..., description="The absolute path to the file containing the function.")
     function_name: str = Field(..., description="The name of the function to generate tests for.")
@@ -191,6 +156,31 @@ class FindInCookbookRequest(BaseModel):
     query: str = Field(..., description="A natural language query to search for a relevant code pattern.")
 
 # --- End of new imports and models ---
+
+# --- New Tool Request Models ---
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+class IntrospectRequest(BaseModel):
+    mode: Literal[
+        "config", "outline", "stats", "inspect"
+    ] = Field(..., description="The introspection mode to use.")
+    file_path: Optional[str] = Field(None, description="The absolute path to the file for inspection.")
+    # For 'inspect' mode
+    function_name: Optional[str] = Field(None, description="The name of the function to inspect.")
+    class_name: Optional[str] = Field(None, description="The name of the class to inspect.")
+    # For 'config' mode
+    config_type: Optional[Literal["pyproject", "requirements"]] = Field(None, description="The type of config file to read.")
+
+class SnippetRequest(BaseModel):
+    file_path: str = Field(..., description="The absolute path to the file.")
+    mode: Literal["function", "class", "lines"] = Field(..., description="The extraction mode.")
+    # For function/class mode
+    name: Optional[str] = Field(None, description="The name of the function or class to extract.")
+    # For lines mode
+    start_line: Optional[int] = Field(None, description="The starting line number (1-indexed).")
+    end_line: Optional[int] = Field(None, description="The ending line number (inclusive).")
+
 
 # --- Dependency Imports ---
 # These are required for the tools to function.
@@ -1259,3 +1249,334 @@ def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
         return _find_in_cookbook_impl(find_req)
     else:
         return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
+
+
+# --- Tool: get_snippet ---
+import ast
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=10)
+def get_snippet(request: SnippetRequest) -> dict:
+    """
+    Extract a precise code snippet from a file by function, class, or line range.
+
+    This tool allows you to programmatically extract:
+      - The full source of a named function (including decorators and signature)
+      - The full source of a named class (including decorators and signature)
+      - An arbitrary range of lines from any text file
+
+    Args:
+        request (SnippetRequest):
+            - file_path (str): Absolute path to the file to extract from. Must be within the project root.
+            - mode (str): Extraction mode. One of:
+                * 'function': Extract a named function by its name.
+                * 'class': Extract a named class by its name.
+                * 'lines': Extract a specific line range.
+            - name (str, optional): Required for 'function' and 'class' modes. The name of the function or class to extract.
+            - start_line (int, optional): Required for 'lines' mode. 1-indexed starting line.
+            - end_line (int, optional): Required for 'lines' mode. 1-indexed ending line (inclusive).
+
+    Returns:
+        dict: Structured JSON response with status and result:
+            - status (str): 'success', 'error', or 'not_found'
+            - snippet (str, optional): The extracted code snippet (if found)
+            - message (str): Human-readable status or error message
+
+    Usage Examples:
+        # Extract a function
+        {
+            "file_path": "/project/src/foo.py",
+            "mode": "function",
+            "name": "my_func"
+        }
+        # Extract lines 10-20
+        {
+            "file_path": "/project/src/foo.py",
+            "mode": "lines",
+            "start_line": 10,
+            "end_line": 20
+        }
+
+    Notes:
+        - Returns an error if the file is outside the project root or does not exist.
+        - For 'function' and 'class', uses Python AST for precise extraction.
+        - For 'lines', both start and end are inclusive and 1-indexed.
+    """
+    import pathlib
+    logger = globals().get('logger', None)
+    try:
+        path = pathlib.Path(request.file_path)
+        if not _is_safe_path(path):
+            msg = f"Unsafe or out-of-project file path: {request.file_path}"
+            if logger: logger.error(f"[get_snippet] {msg}")
+            return {"status": "error", "message": msg}
+        if not path.exists():
+            msg = f"File does not exist: {request.file_path}"
+            if logger: logger.error(f"[get_snippet] {msg}")
+            return {"status": "error", "message": msg}
+        source = path.read_text(encoding="utf-8")
+        if request.mode in ("function", "class"):
+            if not request.name:
+                return {"status": "error", "message": f"'name' must be provided for mode '{request.mode}'"}
+            try:
+                tree = ast.parse(source, filename=str(path))
+                for node in ast.walk(tree):
+                    if request.mode == "function" and isinstance(node, ast.FunctionDef) and node.name == request.name:
+                        snippet = ast.get_source_segment(source, node)
+                        if snippet:
+                            return {"status": "success", "snippet": snippet, "message": "Function extracted."}
+                        else:
+                            return {"status": "not_found", "message": "Function found but could not extract source."}
+                    if request.mode == "class" and isinstance(node, ast.ClassDef) and node.name == request.name:
+                        snippet = ast.get_source_segment(source, node)
+                        if snippet:
+                            return {"status": "success", "snippet": snippet, "message": "Class extracted."}
+                        else:
+                            return {"status": "not_found", "message": "Class found but could not extract source."}
+                return {"status": "not_found", "message": f"No {request.mode} named '{request.name}' found."}
+            except Exception as e:
+                if logger: logger.error(f"[get_snippet] AST parse error: {e}")
+                return {"status": "error", "message": f"AST parse error: {e}"}
+        elif request.mode == "lines":
+            if request.start_line is None or request.end_line is None:
+                return {"status": "error", "message": "start_line and end_line must be provided for 'lines' mode."}
+            lines = source.splitlines()
+            # 1-indexed, inclusive
+            if request.start_line < 1 or request.end_line > len(lines) or request.start_line > request.end_line:
+                return {"status": "error", "message": "Invalid line range."}
+            snippet = "\n".join(lines[request.start_line - 1:request.end_line])
+            return {"status": "success", "snippet": snippet, "message": "Lines extracted."}
+        else:
+            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
+    except Exception as e:
+        if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
+        return {"status": "error", "message": f"Unexpected error: {e}"}
+
+# --- Tool: introspect ---
+@mcp.tool()
+@tool_timeout_and_errors(timeout=30)
+def introspect(request: IntrospectRequest) -> dict:
+    """
+    Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.
+
+    This tool provides several sub-tools (modes) for lightweight, high-speed codebase introspection:
+
+    Modes:
+        - 'config':
+            * Reads project configuration files (pyproject.toml or requirements.txt).
+            * Args: config_type ('pyproject' or 'requirements').
+            * Returns: For 'pyproject', the full TOML text. For 'requirements', a list of package strings.
+        - 'outline':
+            * Returns a high-level structural map of a Python file: all top-level functions and classes (with their methods).
+            * Args: file_path (str)
+            * Returns: functions (list), classes (list of {name, methods})
+        - 'stats':
+            * Calculates basic file statistics: total lines, code lines, comment lines, file size in bytes.
+            * Args: file_path (str)
+            * Returns: total_lines (int), code_lines (int), comment_lines (int), file_size_bytes (int)
+        - 'inspect':
+            * Provides details about a single function or class in a file: name, arguments/methods, docstring.
+            * Args: file_path (str), function_name (str, optional), class_name (str, optional)
+            * Returns: type ('function' or 'class'), name, args/methods, docstring
+
+    Args:
+        request (IntrospectRequest):
+            - mode (str): One of 'config', 'outline', 'stats', 'inspect'.
+            - file_path (str, optional): Path to the file for inspection (required for all except config).
+            - config_type (str, optional): 'pyproject' or 'requirements' for config mode.
+            - function_name (str, optional): Name of function to inspect (for 'inspect' mode).
+            - class_name (str, optional): Name of class to inspect (for 'inspect' mode).
+
+    Returns:
+        dict: Structured JSON response. Always includes:
+            - status (str): 'success', 'error', or 'not_found'
+            - message (str): Human-readable status or error message
+        Mode-specific fields:
+            - config: config_type, content (str) or packages (list)
+            - outline: functions (list), classes (list of {name, methods})
+            - stats: total_lines, code_lines, comment_lines, file_size_bytes
+            - inspect: type, name, args/methods, docstring
+
+    Usage Examples:
+        # Get outline of a file
+        {
+            "mode": "outline",
+            "file_path": "/project/src/foo.py"
+        }
+        # Inspect a function
+        {
+            "mode": "inspect",
+            "file_path": "/project/src/foo.py",
+            "function_name": "my_func"
+        }
+        # Get requirements
+        {
+            "mode": "config",
+            "config_type": "requirements"
+        }
+
+    Notes:
+        - All file paths are validated for project safety.
+        - All operations are fast and read-only (no mutation, no heavy analysis).
+        - Returns 'not_found' if the target file, function, or class does not exist.
+    """
+    import pathlib, ast, os, json
+    logger = globals().get('logger', None)
+    try:
+        # --- config mode ---
+        if request.mode == "config":
+            if request.config_type not in ("pyproject", "requirements"):
+                return {"status": "error", "message": "config_type must be 'pyproject' or 'requirements' for config mode."}
+            root = next(iter(PROJECT_ROOTS.values()), None)
+            if not root:
+                return {"status": "error", "message": "No project root found."}
+            if request.config_type == "pyproject":
+                cfg_path = pathlib.Path(root) / "pyproject.toml"
+                if not cfg_path.exists():
+                    return {"status": "not_found", "message": "pyproject.toml not found."}
+                content = cfg_path.read_text(encoding="utf-8")
+                return {"status": "success", "config_type": "pyproject", "content": content}
+            elif request.config_type == "requirements":
+                req_path = pathlib.Path(root) / "requirements.txt"
+                if not req_path.exists():
+                    return {"status": "not_found", "message": "requirements.txt not found."}
+                lines = req_path.read_text(encoding="utf-8").splitlines()
+                pkgs = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+                return {"status": "success", "config_type": "requirements", "packages": pkgs}
+
+        # --- outline, stats, inspect modes require file_path ---
+        if not request.file_path:
+            return {"status": "error", "message": "file_path must be provided for this mode."}
+        path = pathlib.Path(request.file_path)
+        if not _is_safe_path(path):
+            msg = f"Unsafe or out-of-project file path: {request.file_path}"
+            if logger: logger.error(f"[introspect] {msg}")
+            return {"status": "error", "message": msg}
+        if not path.exists():
+            return {"status": "not_found", "message": f"File does not exist: {request.file_path}"}
+        source = path.read_text(encoding="utf-8")
+
+        # --- outline mode ---
+        if request.mode == "outline":
+            try:
+                tree = ast.parse(source, filename=str(path))
+                functions = []
+                classes = []
+                for node in tree.body:
+                    if isinstance(node, ast.FunctionDef):
+                        functions.append(node.name)
+                    elif isinstance(node, ast.ClassDef):
+                        cls = {"name": node.name, "methods": [n.name for n in node.body if isinstance(n, ast.FunctionDef)]}
+                        classes.append(cls)
+                return {"status": "success", "functions": functions, "classes": classes}
+            except Exception as e:
+                if logger: logger.error(f"[introspect] AST parse error: {e}")
+                return {"status": "error", "message": f"AST parse error: {e}"}
+
+        # --- stats mode ---
+        elif request.mode == "stats":
+            lines = source.splitlines()
+            total_lines = len(lines)
+            comment_lines = sum(1 for l in lines if l.strip().startswith("#"))
+            code_lines = sum(1 for l in lines if l.strip() and not l.strip().startswith("#"))
+            file_size_bytes = os.path.getsize(str(path))
+            return {
+                "status": "success",
+                "total_lines": total_lines,
+                "code_lines": code_lines,
+                "comment_lines": comment_lines,
+                "file_size_bytes": file_size_bytes
+            }
+
+        # --- inspect mode ---
+        elif request.mode == "inspect":
+            if not request.function_name and not request.class_name:
+                return {"status": "error", "message": "Must provide function_name or class_name for inspect mode."}
+            try:
+                tree = ast.parse(source, filename=str(path))
+                # Inspect function
+                if request.function_name:
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.FunctionDef) and node.name == request.function_name:
+                            args = [a.arg for a in node.args.args]
+                            doc = ast.get_docstring(node)
+                            return {
+                                "status": "success",
+                                "type": "function",
+                                "name": node.name,
+                                "args": args,
+                                "docstring": doc
+                            }
+                # Inspect class
+                if request.class_name:
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ClassDef) and node.name == request.class_name:
+                            doc = ast.get_docstring(node)
+                            methods = [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
+                            return {
+                                "status": "success",
+                                "type": "class",
+                                "name": node.name,
+                                "methods": methods,
+                                "docstring": doc
+                            }
+                return {"status": "not_found", "message": "Requested function/class not found."}
+            except Exception as e:
+                if logger: logger.error(f"[introspect] AST parse error: {e}")
+                return {"status": "error", "message": f"AST parse error: {e}"}
+
+        else:
+            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
+    except Exception as e:
+        if logger: logger.error(f"[introspect] Unexpected error: {e}")
+        return {"status": "error", "message": f"Unexpected error: {e}"}
+
+    import pathlib
+    logger = globals().get('logger', None)
+    try:
+        path = pathlib.Path(request.file_path)
+        if not _is_safe_path(path):
+            msg = f"Unsafe or out-of-project file path: {request.file_path}"
+            if logger: logger.error(f"[get_snippet] {msg}")
+            return {"status": "error", "message": msg}
+        if not path.exists():
+            msg = f"File does not exist: {request.file_path}"
+            if logger: logger.error(f"[get_snippet] {msg}")
+            return {"status": "error", "message": msg}
+        source = path.read_text(encoding="utf-8")
+        if request.mode in ("function", "class"):
+            if not request.name:
+                return {"status": "error", "message": f"'name' must be provided for mode '{request.mode}'"}
+            try:
+                tree = ast.parse(source, filename=str(path))
+                for node in ast.walk(tree):
+                    if request.mode == "function" and isinstance(node, ast.FunctionDef) and node.name == request.name:
+                        snippet = ast.get_source_segment(source, node)
+                        if snippet:
+                            return {"status": "success", "snippet": snippet, "message": "Function extracted."}
+                        else:
+                            return {"status": "not_found", "message": "Function found but could not extract source."}
+                    if request.mode == "class" and isinstance(node, ast.ClassDef) and node.name == request.name:
+                        snippet = ast.get_source_segment(source, node)
+                        if snippet:
+                            return {"status": "success", "snippet": snippet, "message": "Class extracted."}
+                        else:
+                            return {"status": "not_found", "message": "Class found but could not extract source."}
+                return {"status": "not_found", "message": f"No {request.mode} named '{request.name}' found."}
+            except Exception as e:
+                if logger: logger.error(f"[get_snippet] AST parse error: {e}")
+                return {"status": "error", "message": f"AST parse error: {e}"}
+        elif request.mode == "lines":
+            if request.start_line is None or request.end_line is None:
+                return {"status": "error", "message": "start_line and end_line must be provided for 'lines' mode."}
+            lines = source.splitlines()
+            # 1-indexed, inclusive
+            if request.start_line < 1 or request.end_line > len(lines) or request.start_line > request.end_line:
+                return {"status": "error", "message": "Invalid line range."}
+            snippet = "\n".join(lines[request.start_line - 1:request.end_line])
+            return {"status": "success", "snippet": snippet, "message": "Lines extracted."}
+        else:
+            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
+    except Exception as e:
+        if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
+        return {"status": "error", "message": f"Unexpected error: {e}"}

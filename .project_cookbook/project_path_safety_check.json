@@ -1,0 +1,8 @@
+{
+    "pattern_name": "project_path_safety_check",
+    "description": "Ensure a given path is inside one of the allowed project roots. Use this pattern to prevent unsafe file access or directory traversal in any file or code operation.",
+    "source_file": "C:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_is_safe_path",
+    "source_code": "def _is_safe_path(path: pathlib.Path) -> bool:\n    \"\"\"Ensure *path* is inside one of the PROJECT_ROOTS roots.\"\"\"\n    try:\n        resolved_path = path.resolve()\n        for root in PROJECT_ROOTS.values():\n            if resolved_path.is_relative_to(root.resolve()):\n                return True\n    except (OSError, ValueError):  # Catches resolution errors or invalid paths\n        return False\n    return False",
+    "added_at_utc": "2025-07-13T03:37:26Z"
+}
