@@ -19,38 +19,30 @@ PROJECT_ROOTS = globals().get('PROJECT_ROOTS', {})
 
 mcp = FastMCP()
 
-def _get_project_path(project_name: str) -> pathlib.Path:
-    if project_name not in PROJECT_ROOTS:
-        raise ValueError(f"Unknown project: {project_name}")
-    return pathlib.Path(PROJECT_ROOTS[project_name])
 
 # ------------------------
 # Pydantic Request Models
 # ------------------------
 
 class GeminiCodeExplainerRequest(BaseModel):
-    project_name: str = Field(..., description="Project context name.")
-    source_file: Optional[str] = Field(None, description="Relative path to the source file.")
+    source_file: Optional[str] = Field(None, description="Absolute or relative path to the source file.")
     function_name: Optional[str] = Field(None, description="Function to explain.")
     snippet: Optional[str] = Field(None, description="Direct code snippet to explain.")
     timeout: int = Field(default=60, description="Timeout in seconds.")
 
 class GeminiCodeReviewRequest(BaseModel):
-    project_name: str
     source_file: Optional[str] = None
     diff: Optional[str] = None
     review_level: Literal["quick", "thorough"] = "quick"
     timeout: int = 60
 
 class GeminiDocstringGenRequest(BaseModel):
-    project_name: str
     source_file: str
     function_name: Optional[str] = None
     docstring_style: Literal["google", "numpy", "rest"] = "google"
     timeout: int = 60
 
 class GeminiRefactorRequest(BaseModel):
-    project_name: str
     source_file: str
     refactor_type: Literal["rename", "extract_method", "simplify"]
     target: str
@@ -58,7 +50,6 @@ class GeminiRefactorRequest(BaseModel):
     timeout: int = 60
 
 class GeminiBugFinderRequest(BaseModel):
-    project_name: str
     source_file: str
     function_name: Optional[str] = None
     timeout: int = 60
@@ -68,7 +59,6 @@ class GeminiUsageAnalyzerRequest(BaseModel):
     user: Optional[str] = None
 
 class GeminiCommitSummarizerRequest(BaseModel):
-    project_name: str
     repo_path: str
     commit_range: Optional[str] = None
     timeout: int = 60
@@ -77,11 +67,33 @@ class GeminiCommitSummarizerRequest(BaseModel):
 # Helper Functions
 # ------------------------
 
-def _read_file(project_path: pathlib.Path, relative_path: str) -> str:
-    file_path = (project_path / relative_path).resolve()
-    if not str(file_path).startswith(str(project_path.resolve())):
-        raise ValueError(f"Unsafe path: {relative_path}")
-    return file_path.read_text(encoding="utf-8")
+import subprocess
+
+def _read_file(file_path: str) -> str:
+    """Safely reads a file by absolute or relative path, restricting to the workspace root."""
+    abs_path = pathlib.Path(file_path).resolve()
+    # Restrict to workspace root for safety
+    workspace_root = pathlib.Path(__file__).parent.parent.resolve()
+    if not str(abs_path).startswith(str(workspace_root)):
+        raise ValueError(f"Unsafe path: {file_path}")
+    return abs_path.read_text(encoding="utf-8")
+
+def call_gflash(prompt: str, timeout: int = 60) -> str:
+    """Call the Gemini CLI with the Gemini-2.5-Flash model and return the output."""
+    try:
+        result = subprocess.run(
+            ["gemini", "-m", "gemini-2.5-flash"],
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode("utf-8"))
+        return result.stdout.decode("utf-8")
+    except Exception as e:
+        if logger: logger.error(f"[gemini] {e}")
+        return f"[gemini ERROR] {e}"
 
 # ------------------------
 # Tool Implementations
@@ -97,18 +109,16 @@ def gemini_code_explainer(request: GeminiCodeExplainerRequest) -> dict:
         dict: Explanation or error.
     """
     try:
-        project_path = _get_project_path(request.project_name)
         code = request.snippet
         if not code and request.source_file:
-            code = _read_file(project_path, request.source_file)
+            code = _read_file(request.source_file)
             if request.function_name:
-                # For demo, just find function by name (not robust)
                 import re
                 pattern = rf"def {request.function_name}\\s*\\(.*?\\):[\\s\\S]*?^(?=def |class |$)"
                 match = re.search(pattern, code, re.MULTILINE)
                 code = match.group(0) if match else code
-        # Placeholder: Replace with Gemini API call
-        explanation = f"[Gemini] Explanation for code: {code[:80]}..."
+        prompt = f"Explain the following code:\n\n{code}"
+        explanation = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "explanation": explanation}
     except Exception as e:
         if logger: logger.error(f"[gemini_code_explainer] {e}")
@@ -120,12 +130,11 @@ def gemini_code_reviewer(request: GeminiCodeReviewRequest) -> dict:
     Reviews code or a diff using Gemini, returning suggestions and feedback.
     """
     try:
-        project_path = _get_project_path(request.project_name)
         code = request.diff
         if not code and request.source_file:
-            code = _read_file(project_path, request.source_file)
-        # Placeholder: Replace with Gemini API call
-        review = f"[Gemini] Review ({request.review_level}) for code: {code[:80]}..."
+            code = _read_file(request.source_file)
+        prompt = f"Review the following code for bugs, improvements, and best practices:\n\n{code}"
+        review = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "review": review}
     except Exception as e:
         if logger: logger.error(f"[gemini_code_reviewer] {e}")
@@ -137,10 +146,9 @@ def gemini_docstring_generator(request: GeminiDocstringGenRequest) -> dict:
     Generates or updates docstrings for functions/classes using Gemini.
     """
     try:
-        project_path = _get_project_path(request.project_name)
-        code = _read_file(project_path, request.source_file)
-        # Placeholder: Replace with Gemini API call
-        docstring = f"[Gemini] Generated docstring in {request.docstring_style} style."
+        code = _read_file(request.source_file)
+        prompt = f"Generate a {request.docstring_style} style docstring for the following code:\n\n{code}"
+        docstring = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "docstring": docstring}
     except Exception as e:
         if logger: logger.error(f"[gemini_docstring_generator] {e}")
@@ -152,10 +160,9 @@ def gemini_refactor_tool(request: GeminiRefactorRequest) -> dict:
     Suggests or applies refactorings to code using Gemini.
     """
     try:
-        project_path = _get_project_path(request.project_name)
-        code = _read_file(project_path, request.source_file)
-        # Placeholder: Replace with Gemini API call
-        refactor_msg = f"[Gemini] Refactor ({request.refactor_type}) on {request.target}."
+        code = _read_file(request.source_file)
+        prompt = f"Refactor the following code. Refactor type: {request.refactor_type}. Target: {request.target}.\n\n{code}"
+        refactor_msg = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "refactor": refactor_msg}
     except Exception as e:
         if logger: logger.error(f"[gemini_refactor_tool] {e}")
@@ -167,10 +174,12 @@ def gemini_bug_finder(request: GeminiBugFinderRequest) -> dict:
     Finds bugs or anti-patterns in code using Gemini.
     """
     try:
-        project_path = _get_project_path(request.project_name)
-        code = _read_file(project_path, request.source_file)
-        # Placeholder: Replace with Gemini API call
-        bug_report = f"[Gemini] Bug analysis for {request.function_name or 'file'}: None found."
+        code = _read_file(request.source_file)
+        if request.function_name:
+            prompt = f"Find bugs or anti-patterns in the following function named '{request.function_name}':\n\n{code}"
+        else:
+            prompt = f"Find bugs or anti-patterns in the following code:\n\n{code}"
+        bug_report = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "bugs": bug_report}
     except Exception as e:
         if logger: logger.error(f"[gemini_bug_finder] {e}")
@@ -195,8 +204,19 @@ def gemini_commit_summarizer(request: GeminiCommitSummarizerRequest) -> dict:
     Summarizes git commits or PRs using Gemini.
     """
     try:
-        # Placeholder: Replace with real git integration and Gemini call
-        summary = f"[Gemini] Commit summary for {request.commit_range or 'HEAD'} in {request.repo_path}."
+        # For commit summarizer, you might want to run 'git log' and pass the output to gflash
+        import subprocess
+        commit_range = request.commit_range or 'HEAD'
+        try:
+            git_log = subprocess.check_output(
+                ["git", "log", commit_range, "--pretty=medium"],
+                cwd=request.repo_path,
+                timeout=request.timeout,
+            ).decode("utf-8")
+        except Exception as e:
+            git_log = f"[Error getting git log: {e}]"
+        prompt = f"Summarize the following git commit log:\n\n{git_log}"
+        summary = call_gflash(prompt, timeout=request.timeout)
         return {"status": "success", "summary": summary}
     except Exception as e:
         if logger: logger.error(f"[gemini_commit_summarizer] {e}")
@@ -208,14 +228,13 @@ def gemini_commit_summarizer(request: GeminiCommitSummarizerRequest) -> dict:
 
 class GeminiTestGeneratorRequest(BaseModel):
     mode: Literal["generate", "run", "status"] = Field(..., description="Operation mode.")
-    project_name: str = Field(..., description="Project context name.")
     # --- Args for 'run' mode ---
     command: Optional[str] = Field(None, description="[run mode] The shell command to execute.")
     report_file: Optional[str] = Field(None, description="[run mode] Optional report file to read.")
     # --- Args for 'generate' mode ---
-    source_file: Optional[str] = Field(None, description="[generate mode] Relative path to the source file.")
+    source_file: Optional[str] = Field(None, description="[generate mode] Absolute or relative path to the source file.")
     function_name: Optional[str] = Field(None, description="[generate mode] Name of the function to test.")
-    test_file_path: Optional[str] = Field(None, description="[generate mode] Relative path to save the new test file.")
+    test_file_path: Optional[str] = Field(None, description="[generate mode] Absolute or relative path to save the new test file.")
     test_type: Literal["unit", "parameterized", "integration"] = Field("unit", description="Type of test to generate.")
     coverage_goal: Optional[str] = Field(None, description="Coverage focus: function, branch, file, etc.")
     test_style: Literal["pytest", "unittest"] = Field("pytest", description="Test framework style.")

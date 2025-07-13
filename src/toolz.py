@@ -1354,14 +1354,6 @@ def get_snippet(request: SnippetRequest) -> dict:
         if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
         return {"status": "error", "message": f"Unexpected error: {e}"}
 
-# ---------------------------------------------------------------------------
-# Tool: Test Suite Manager (Generate, Run & Status)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Tool: Test Suite Manager (Generate, Run & Status)
-# ---------------------------------------------------------------------------
 def introspect(request: IntrospectRequest) -> dict:
     """
     Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.
