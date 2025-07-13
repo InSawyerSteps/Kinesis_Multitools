@@ -49,6 +49,7 @@ import functools
 import traceback
 import multiprocessing
 import time
+from datetime import datetime, timedelta
 
 # This module provides two primary tools for an AI agent:
 #   - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
@@ -177,6 +178,7 @@ class SnippetRequest(BaseModel):
     mode: Literal["function", "class", "lines"] = Field(..., description="The extraction mode.")
     # For function/class mode
     name: Optional[str] = Field(None, description="The name of the function or class to extract.")
+
     # For lines mode
     start_line: Optional[int] = Field(None, description="The starting line number (1-indexed).")
     end_line: Optional[int] = Field(None, description="The ending line number (inclusive).")
@@ -1352,9 +1354,14 @@ def get_snippet(request: SnippetRequest) -> dict:
         if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
         return {"status": "error", "message": f"Unexpected error: {e}"}
 
-# --- Tool: introspect ---
-@mcp.tool()
-@tool_timeout_and_errors(timeout=30)
+# ---------------------------------------------------------------------------
+# Tool: Test Suite Manager (Generate, Run & Status)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Tool: Test Suite Manager (Generate, Run & Status)
+# ---------------------------------------------------------------------------
 def introspect(request: IntrospectRequest) -> dict:
     """
     Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.
