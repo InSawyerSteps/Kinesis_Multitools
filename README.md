@@ -7,8 +7,8 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
 - **Modern FastMCP Backend:**
   - Uses `fastmcp==2.9.2` for maximum performance and compatibility (see `requirements.txt`).
 - **Supported MCP Tools:**
-  - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-  - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+  - `index_project_files`: Incremental semantic indexing of project files for search.
+  - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification.
   - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
   - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range. Supports extracting the full source of a named function or class (using AST), or any arbitrary line range. Returns a structured status, snippet content, and message. See below for usage details.
   - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files. Supports modes for config file reading, structural outline, file statistics, and deep inspection of a function or class. Returns structured results for each mode. See below for usage details.
