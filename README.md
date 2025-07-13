@@ -119,8 +119,7 @@ The following key patterns from `src/toolz.py` are now available in the project 
 ### Indexing the Project
 
 Several of the `/search` subtools rely on a FAISS vector index generated from
-your source files.  This index is stored in a hidden folder named
-`.windsurf_search_index` inside the project root.  If the index does not exist,
+your source files.  This index is stored in a hidden folder inside the project root.  If the index does not exist,
 embedding‑based modes such as `semantic`, `similarity` and `task_verification`
 return an error:
 
@@ -200,8 +199,8 @@ Content-Type: application/json
 
 We welcome suggestions and contributions for new tools! If you have an idea for a code intelligence, search, or automation tool that would benefit the community, please open an issue or submit a pull request.
 
-- `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+- `index_project_files`: Incremental semantic indexing of project files for search.
+- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification.
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
 - `get_snippet`: Extract a function, class, or line range from any project file. See below for details.
 - `introspect`: Multi-modal code/project introspection for config, outline, stats, and inspect. See below for details.
