@@ -102,18 +102,19 @@ For details on tool usage and extension, see `tooldevguide.md`.
 
 ## Canonical Patterns in the Cookbook
 
-The following key patterns from `src/toolz.py` are now available in the project Cookbook for rapid reuse and code consistency. Use the `cookbook_multitool` to search for or add these patterns to new projects:
+The following key patterns from `src/toolz.py` are available in the project Cookbook for rapid reuse and code consistency. Use the `cookbook_multitool` to search for or add these patterns to new projects:
 
-| Pattern Name                       | Function Name                | Description                                                                                       |
-|------------------------------------|------------------------------|---------------------------------------------------------------------------------------------------|
-| secure_project_file_listing        | list_project_files           | Canonical function for recursively listing files in a project, with robust filtering and validation.|
-| safe_file_read_with_validation     | read_project_file            | Safely reads a file, enforcing project root constraints and handling text/binary content.          |
-| incremental_vector_indexing        | index_project_files          | Efficiently indexes project files for semantic search, only embedding changed/added files.         |
-| multimodal_search_dispatch         | unified_search               | Unified entrypoint for multi-modal codebase search with robust error handling.                     |
-| process_timeout_and_error_decorator| tool_process_timeout_and_errors | Decorator for process-based timeout and error handling for MCP tools.                              |
-| thread_timeout_and_error_decorator | tool_timeout_and_errors      | Decorator for thread-based timeout and error handling for MCP tools.                               |
-| secure_path_validation             | _is_safe_path                | Validates that a path is within the configured project root(s), preventing unauthorized access.    |
-| batch_embedding_with_lazy_model    | _embed_batch                 | Batch embedding logic with lazy model loading and device selection.                                |
+| Pattern Name                         | Function Name                     | Description                                                                                                     |
+|--------------------------------------|-----------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| incremental_vector_indexing          | index_project_files               | Efficiently indexes project files for semantic search by reusing unchanged vectors and only embedding changes.   |
+| multimodal_search_dispatch           | unified_search                    | Unified entrypoint for multi-modal codebase search with robust error handling and subtool dispatch.              |
+| process_timeout_and_error_decorator  | tool_process_timeout_and_errors   | Decorator for running a function in a separate process with a hard timeout and robust error handling.            |
+| thread_timeout_and_error_decorator   | tool_timeout_and_errors           | Decorator for running a function in a thread with a hard timeout, logging all exceptions and returning errors.   |
+| project_path_safety_check            | _is_safe_path                     | Ensures a given path is inside one of the allowed project roots. Prevents unsafe file access or traversal.       |
+| precise_code_snippet_extractor       | get_snippet                       | Extracts a precise code snippet from a file by function, class, or line range using AST or line ranges.          |
+| multi_modal_code_introspection       | introspect                        | Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.           |
+
+If you implement a new utility or multitool that solves a general problem (e.g., logging, config loading, error formatting), consider adding it to the Cookbook for future reuse.
 
 
 ### Indexing the Project
