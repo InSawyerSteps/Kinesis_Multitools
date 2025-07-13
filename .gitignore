@@ -36,8 +36,11 @@ rag_recruiting_mvp/depe
 
 metadata.json
 index.faiss
-windsurf_search_index
+.windsurf_search_index
 .windsurf
+.windsurfrules
+edit_text.txt
+mcp_server.log
 indexing.md
 search.md
 cookbook.md
