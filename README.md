@@ -7,8 +7,8 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
 - **Modern FastMCP Backend:**
   - Uses `fastmcp==2.9.2` for maximum performance and compatibility (see `requirements.txt`).
 - **Supported MCP Tools:**
-  - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-  - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+  - `index_project_files`: Incremental semantic indexing of project files for search.
+  - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification.
   - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
   - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range. Supports extracting the full source of a named function or class (using AST), or any arbitrary line range. Returns a structured status, snippet content, and message. See below for usage details.
   - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files. Supports modes for config file reading, structural outline, file statistics, and deep inspection of a function or class. Returns structured results for each mode. See below for usage details.
@@ -120,8 +120,7 @@ If you implement a new utility or multitool that solves a general problem (e.g.,
 ### Indexing the Project
 
 Several of the `/search` subtools rely on a FAISS vector index generated from
-your source files.  This index is stored in a hidden folder named
-`.windsurf_search_index` inside the project root.  If the index does not exist,
+your source files.  This index is stored in a hidden folder inside the project root.  If the index does not exist,
 embedding‑based modes such as `semantic`, `similarity` and `task_verification`
 return an error:
 
@@ -201,8 +200,8 @@ Content-Type: application/json
 
 We welcome suggestions and contributions for new tools! If you have an idea for a code intelligence, search, or automation tool that would benefit the community, please open an issue or submit a pull request.
 
-- `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+- `index_project_files`: Incremental semantic indexing of project files for search.
+- `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification.
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
 - `get_snippet`: Extract a function, class, or line range from any project file. See below for details.
 - `introspect`: Multi-modal code/project introspection for config, outline, stats, and inspect. See below for details.
