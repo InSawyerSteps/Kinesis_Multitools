@@ -371,43 +371,52 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 
 # ---------------------------------------------------------------------------
 # General-purpose Project Tools (migrated from toolz.py)
-# ---------------------------------------------------------------------------
 
 @mcp.tool()
-@tool_timeout_and_errors(timeout=60)
-def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
+def list_files_anywhere(
+    directory_path: str,
+    extensions: Optional[List[str]] = None,
+    max_items: int = 1000
+) -> dict:
     """
-    Recursively list files for a given project.
+    List files under any absolute directory path, optionally filtering by extension.
 
     Args:
-        project_name (str): Name of the project as defined in PROJECT_ROOTS (e.g., "MCP-Server").
+        directory_path (str): Absolute path to the directory to scan.
         extensions (List[str], optional): List of file extensions to include (e.g., ["py", "md"]). If omitted, all files are included.
         max_items (int, optional): Maximum number of files to return (default: 1000).
 
     Returns:
-        List[str]: Absolute file paths as strings.
-
-    Usage:
-        Use this tool to get a list of all source files in a project, optionally filtered by extension. Useful for building file pickers, search indexes, or for pre-filtering files for other tools.
+        dict: {
+            'status': 'success'|'error',
+            'files': List[str],  # Only present if status == 'success'
+            'message': str       # Error message if status == 'error'
+        }
     """
-    logger.info("[list_files] project=%s extensions=%s", project_name, extensions)
-    root = PROJECT_ROOTS.get(project_name)
-    if not root:
-        logger.error("Invalid project name: %s", project_name)
-        return []
+    import pathlib, os
+    from typing import List, Optional, Dict, Any
     results = []
     try:
-        for fp in _iter_files(root, extensions):
-            if len(results) >= max_items:
-                logger.warning("Hit max_items limit of %d. Returning partial results.", max_items)
-                break
-            results.append(str(fp.resolve()))
-        logger.info("[list_files] Found %d paths.", len(results))
+        root = pathlib.Path(directory_path)
+        if not root.is_dir():
+            return {"status": "error", "message": f"Not a directory: {directory_path}"}
+        if extensions:
+            norm_exts = {f".{str(e).lower().lstrip('.')}" for e in extensions if isinstance(e, str)}
+        else:
+            norm_exts = None
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            for fname in filenames:
+                fpath = pathlib.Path(dirpath) / fname
+                if fpath.is_symlink():
+                    continue
+                if norm_exts and fpath.suffix.lower() not in norm_exts:
+                    continue
+                results.append(str(fpath.resolve()))
+                if len(results) >= max_items:
+                    return {"status": "success", "files": results}
+        return {"status": "success", "files": results}
     except Exception as e:
-        logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
-    return results
-
-@mcp.tool()
+        return {"status": "error", "message": str(e)}
 @tool_timeout_and_errors(timeout=60)
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
