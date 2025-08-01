@@ -393,6 +393,44 @@ def _is_safe_path(path: pathlib.Path) -> bool:
     return False
 
 # ---------------------------------------------------------------------------
+# Project Root Registration Tool
+# ---------------------------------------------------------------------------
+
+@tool_timeout_and_errors(timeout=10)
+@mcp.tool()
+def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
+    """
+    Dynamically register a project root at runtime, enabling all project-based tools to operate on the specified folder.
+
+    Args:
+        path (str): Absolute path to the folder to register as a project root.
+        project_name (str, optional): Alias for the project. Defaults to the folder name if not provided.
+
+    Returns:
+        dict: Status, message, and current project roots.
+
+    Usage:
+        - Call this tool with the desired path (and optional alias) to register a new project root.
+        - All project-based tools (index, search, read, list) will immediately recognize the new root.
+    """
+    logger.info(f"[anchor_drop] Registering project root: path={path}, project_name={project_name}")
+    try:
+        base_path = pathlib.Path(path).resolve()
+        if not base_path.exists() or not base_path.is_dir():
+            return {"status": "error", "message": f"Path does not exist or is not a directory: {path}"}
+        alias = project_name if project_name else base_path.name
+        PROJECT_ROOTS[alias] = base_path
+        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}")
+        return {
+            "status": "success",
+            "message": f"Registered project root '{alias}' at '{base_path}'.",
+            "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
+        }
+    except Exception as e:
+        logger.error(f"[anchor_drop] Failed to register project root: {e}")
+        return {"status": "error", "message": f"Failed to register project root: {e}"}
+
+# ---------------------------------------------------------------------------
 # General-purpose Project Tools (migrated from toolz.py)
 # ---------------------------------------------------------------------------
 

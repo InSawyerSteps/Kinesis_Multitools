@@ -20,6 +20,27 @@
 
 ---
 
+## Registering a Project Root with anchor_drop
+
+Before using any project-based tools (index, search, read, list, etc.) in a new folder, you **must** call the `anchor_drop` tool to register the folder as a project root. This enables all tools to work path-agnostically in any folder, not just the cookbook tool.
+
+**How to use anchor_drop:**
+- Call `anchor_drop` with the absolute path to your project folder (optionally provide a project name/alias).
+- Example:
+  ```json
+  {
+    "path": "C:/Projects/Julius",
+    "project_name": "Julius"
+  }
+  ```
+- After this, all project-based tools will work in the new folder for the duration of your session.
+
+**Best Practice:**
+- Always drop an anchor at the start of working in a new project folder.
+- You only need to do this once per session or per new folder.
+
+---
+
 ## Code Cookbook Multitool (`cookbook_multitool`)
 
 The `cookbook_multitool` is a unified endpoint for capturing, searching, updating, and removing canonical code patterns ("golden patterns") in your project. It supersedes the old `add_to_cookbook` and `find_in_cookbook` tools.

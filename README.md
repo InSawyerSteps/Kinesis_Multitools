@@ -1,5 +1,19 @@
 # Kinesis Multitools
 
+**IMPORTANT: Before using any project-based tools in a new folder, you MUST call the `anchor_drop` tool to register the folder as a project root.**
+
+> **How to use anchor_drop:**
+> - Call `anchor_drop` with the absolute path to your project folder (and optionally a project name/alias).
+> - Example:
+>   ```json
+>   {
+>     "path": "C:/Projects/Julius",
+>     "project_name": "Julius"
+>   }
+>   ```
+> - After this, all tools (index, search, read, list, etc.) will work in the new folder.
+> - You only need to do this once per session or per new folder.
+
 Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code intelligence, semantic code search, and canonical code pattern management. Built for reliability and security, it enables both developers and AI agents to analyze, search, and interact with codebases efficiently—while remaining open to new tool ideas from the community.
 
 ## Key Features
@@ -7,13 +21,14 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
 - **Modern FastMCP Backend:**
   - Uses `fastmcp==2.9.2` for maximum performance and compatibility (see `requirements.txt`).
 - **Supported MCP Tools:**
+  - `anchor_drop`: Register any folder as a project root at runtime. **Must be called before using other tools in a new folder.**
   - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
   - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
   - `cookbook_multitool`: Unified tool for capturing, searching, updating, and removing canonical code patterns. Supports `add`, `find`, `remove`, and `update` modes. Path-agnostic: always uses the project directory as the base for the cookbook.
   - File read/list utilities: Safe listing and reading of project files.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
-- **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
+- **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root (which can now be set dynamically with anchor_drop).
 - **Extensible:** A development guide (`tooldevguide.md`) provides a blueprint for adding new capabilities.
 - **Path-Agnostic Cookbook:** The cookbook tool always stores patterns in `.project_cookbook` at the project root, regardless of project registration.
 
@@ -76,6 +91,22 @@ Configure the MCP server in your `mcp_config.json`:
 **Note:** Ensure the `command` path points to the correct `fastmcp.exe` in your `.venv`.
 
 ## Usage
+
+### Starting Work in a New Project Folder
+
+**1. Drop an Anchor:**
+Before using any project-based tools, call the `anchor_drop` tool to register the folder:
+```json
+{
+  "path": "C:/Projects/Julius",
+  "project_name": "Julius"
+}
+```
+
+**2. Use all other tools as normal.**
+Once the anchor is dropped, all tools (index, search, read, list, etc.) will work in the new folder.
+
+---
 
 ### Cookbook Multitool
 
