@@ -1069,12 +1069,12 @@ OLLAMA_MODEL_FOR_TESTS = os.environ.get("OLLAMA_MODEL_FOR_TESTS", _OLLAMA_MAIN_M
 COOKBOOK_DIR_NAME = ".project_cookbook"
 
 class CookbookMultitoolRequest(BaseModel):
-    mode: str = Field(..., description="Operation mode: 'add' or 'find'.")
-    # For 'add' mode
-    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add').")
-    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add').")
-    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add').")
-    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add').")
+    mode: str = Field(..., description="Operation mode: 'add', 'find', 'remove', or 'update'.")
+    # For 'add' and 'update' modes
+    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add', 'remove', 'update').")
+    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add', optional for 'update').")
+    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add', optional for 'update').")
+    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add', optional for 'update').")
     # For 'find' mode
     query: Optional[str] = Field(None, description="Search query for finding patterns (required for 'find').")
 
@@ -1165,19 +1165,69 @@ def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
         return {"status": "not_found", "message": f"No patterns found matching the query: '{request.query}'"}
     return {"status": "success", "results": matches}
 
+
+def _remove_from_cookbook_impl(pattern_name: str) -> dict:
+    """
+    Removes a pattern from the cookbook by pattern_name.
+    Returns success or error dict.
+    """
+    project_path = _get_project_path("MCP-Server")
+    if not project_path:
+        return {"status": "error", "message": "Project 'MCP-Server' not found."}
+    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{pattern_name}' does not exist."}
+    try:
+        pattern_path.unlink()
+        return {"status": "success", "message": f"Pattern '{pattern_name}' was removed from the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to remove pattern: {e}"}
+
+
+def _update_cookbook_pattern_impl(request: CookbookMultitoolRequest) -> dict:
+    """
+    Updates a pattern in the cookbook by pattern_name. Only provided fields are updated.
+    Returns success or error dict.
+    """
+    project_path = _get_project_path("MCP-Server")
+    if not project_path:
+        return {"status": "error", "message": "Project 'MCP-Server' not found."}
+    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{request.pattern_name}' does not exist."}
+    try:
+        with open(pattern_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Only update fields that are provided
+        if request.file_path:
+            data["source_file"] = request.file_path
+        if request.function_name:
+            data["function_name"] = request.function_name
+        if request.description:
+            data["description"] = request.description
+        with open(pattern_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was updated in the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update pattern: {e}"}
+
 @tool_process_timeout_and_errors(timeout=30)
 @mcp.tool()
 def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     """
-    Unified Code Cookbook multitool for adding and searching code patterns.
+    Unified Code Cookbook multitool for adding, searching, removing, and updating code patterns.
 
     Args:
         request (CookbookMultitoolRequest):
-            - mode (str): 'add' to save a new pattern, 'find' to search for patterns.
-            - pattern_name (str, required for 'add'): Unique name for the pattern.
-            - file_path (str, required for 'add'): Absolute path to the file containing the function.
-            - function_name (str, required for 'add'): Name of the function to save.
-            - description (str, required for 'add'): Description of the pattern.
+            - mode (str): 'add' to save a new pattern, 'find' to search for patterns, 'remove' to remove a pattern, 'update' to update a pattern.
+            - pattern_name (str, required for 'add', 'remove', 'update'): Unique name for the pattern.
+            - file_path (str, required for 'add', optional for 'update'): Absolute path to the file containing the function.
+            - function_name (str, required for 'add', optional for 'update'): Name of the function to save.
+            - description (str, required for 'add', optional for 'update'): Description of the pattern.
             - query (str, required for 'find'): Search query for finding patterns.
 
     Returns:
@@ -1186,6 +1236,8 @@ def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     Usage:
         - To add: mode='add', pattern_name, file_path, function_name, description
         - To find: mode='find', query
+        - To remove: mode='remove', pattern_name
+        - To update: mode='update', pattern_name, file_path, function_name, description
     """
     logger.info(f"[cookbook_multitool] mode={request.mode}")
     if request.mode == "add":
@@ -1204,5 +1256,13 @@ def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
             return {"status": "error", "message": "Missing 'query' for 'find' mode."}
         find_req = FindInCookbookRequest(query=request.query)
         return _find_in_cookbook_impl(find_req)
+    elif request.mode == "remove":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'remove' mode."}
+        return _remove_from_cookbook_impl(request.pattern_name)
+    elif request.mode == "update":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'update' mode."}
+        return _update_cookbook_pattern_impl(request)
     else:
-        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
+        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add', 'find', 'remove', or 'update'."}
