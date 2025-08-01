@@ -1089,10 +1089,8 @@ class FindInCookbookRequest(BaseModel):
 
 def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
     logger.info(f"[add_to_cookbook] Adding pattern '{request.pattern_name}' from {request.file_path}::{request.function_name}")
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     cookbook_dir.mkdir(exist_ok=True)
     safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
     output_path = cookbook_dir / safe_filename
@@ -1143,10 +1141,8 @@ def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
 
 def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
     logger.info(f"[find_in_cookbook] Searching for pattern with query: '{request.query}'")
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     if not cookbook_dir.is_dir():
         return {"status": "not_found", "message": "Cookbook directory does not exist. Add a pattern first."}
     matches = []
@@ -1171,10 +1167,8 @@ def _remove_from_cookbook_impl(pattern_name: str) -> dict:
     Removes a pattern from the cookbook by pattern_name.
     Returns success or error dict.
     """
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     safe_filename = re.sub(r'[^\w\-_\. ]', '_', pattern_name) + ".json"
     pattern_path = cookbook_dir / safe_filename
     if not pattern_path.exists():
@@ -1191,10 +1185,8 @@ def _update_cookbook_pattern_impl(request: CookbookMultitoolRequest) -> dict:
     Updates a pattern in the cookbook by pattern_name. Only provided fields are updated.
     Returns success or error dict.
     """
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
     pattern_path = cookbook_dir / safe_filename
     if not pattern_path.exists():

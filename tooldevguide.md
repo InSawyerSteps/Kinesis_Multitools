@@ -22,14 +22,20 @@
 
 ## Code Cookbook Multitool (`cookbook_multitool`)
 
-The `cookbook_multitool` is a unified endpoint for capturing and searching canonical code patterns ("golden patterns") in your project. It supersedes the old `add_to_cookbook` and `find_in_cookbook` tools.
+The `cookbook_multitool` is a unified endpoint for capturing, searching, updating, and removing canonical code patterns ("golden patterns") in your project. It supersedes the old `add_to_cookbook` and `find_in_cookbook` tools.
 
 ### Purpose
 - **Add** a function's source and metadata to the project cookbook for future reuse and code consistency.
 - **Find** patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
+- **Remove** a pattern from the cookbook by its unique name.
+- **Update** a pattern's metadata or source information by name.
+
+### Path-Agnostic Behavior
+- The cookbook tool always uses the project directory (`C:\Projects\MCP Server`) as the base for `.project_cookbook`.
+- All patterns are stored as JSON files in `.project_cookbook/` in the project root, regardless of project registration.
 
 ### Request Schema
-- `mode` (`str`): Either `"add"` or `"find"`. Required.
+- `mode` (`str`): One of `"add"`, `"find"`, `"remove"`, or `"update"`. Required.
 - For `add` mode:
     - `pattern_name` (`str`): Unique name for the pattern. Required.
     - `file_path` (`str`): Absolute path to the file containing the function. Required.
@@ -37,6 +43,11 @@ The `cookbook_multitool` is a unified endpoint for capturing and searching canon
     - `description` (`str`): Description of the pattern. Required.
 - For `find` mode:
     - `query` (`str`): Search query for finding patterns. Required.
+- For `remove` mode:
+    - `pattern_name` (`str`): Unique name for the pattern. Required.
+- For `update` mode:
+    - `pattern_name` (`str`): Unique name for the pattern. Required.
+    - Any of `file_path`, `function_name`, or `description` (at least one required).
 
 ### Example Usage
 
@@ -59,14 +70,32 @@ The `cookbook_multitool` is a unified endpoint for capturing and searching canon
 }
 ```
 
+#### Update a Pattern
+```json
+{
+  "mode": "update",
+  "pattern_name": "My Golden Pattern",
+  "description": "Updated description for the pattern."
+}
+```
+
+#### Remove a Pattern
+```json
+{
+  "mode": "remove",
+  "pattern_name": "My Golden Pattern"
+}
+```
+
 ### Response
-- On success, returns a status and message (for add), or a list of matching patterns (for find).
+- On success, returns a status and message (for add, update, remove), or a list of matching patterns (for find).
 - Cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
 
 ### Best Practices
 - Use descriptive, unique pattern names to avoid collisions.
 - Store only canonical, well-tested functions as cookbook patterns.
 - Use the find mode to enforce code consistency and accelerate onboarding.
+- Use remove/update to keep the cookbook clean and current.
 
 See the README for a summary and user-facing instructions.
 

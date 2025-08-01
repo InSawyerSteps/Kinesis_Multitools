@@ -9,12 +9,13 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
 - **Supported MCP Tools:**
   - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
   - `search`: Multi-modal codebase search (keyword, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
-  - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
+  - `cookbook_multitool`: Unified tool for capturing, searching, updating, and removing canonical code patterns. Supports `add`, `find`, `remove`, and `update` modes. Path-agnostic: always uses the project directory as the base for the cookbook.
   - File read/list utilities: Safe listing and reading of project files.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
 - **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
 - **Extensible:** A development guide (`tooldevguide.md`) provides a blueprint for adding new capabilities.
+- **Path-Agnostic Cookbook:** The cookbook tool always stores patterns in `.project_cookbook` at the project root, regardless of project registration.
 
 ## Installation
 
@@ -75,6 +76,54 @@ Configure the MCP server in your `mcp_config.json`:
 **Note:** Ensure the `command` path points to the correct `fastmcp.exe` in your `.venv`.
 
 ## Usage
+
+### Cookbook Multitool
+
+The `cookbook_multitool` supports the following modes:
+- **add**: Add a function's source and metadata to the project cookbook for future reuse and code consistency.
+- **find**: Find patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
+- **remove**: Remove a pattern from the cookbook by its unique name.
+- **update**: Update a pattern's metadata or source information by name.
+
+All cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root (`C:\Projects\MCP Server`).
+
+#### Example Requests
+
+Add a pattern:
+```json
+{
+  "mode": "add",
+  "pattern_name": "My Golden Pattern",
+  "file_path": "C:/Projects/MCP Server/src/toolz.py",
+  "function_name": "_is_safe_path",
+  "description": "A canonical function for secure path validation."
+}
+```
+
+Find a pattern:
+```json
+{
+  "mode": "find",
+  "query": "secure path"
+}
+```
+
+Update a pattern:
+```json
+{
+  "mode": "update",
+  "pattern_name": "My Golden Pattern",
+  "description": "Updated description for the pattern."
+}
+```
+
+Remove a pattern:
+```json
+{
+  "mode": "remove",
+  "pattern_name": "My Golden Pattern"
+}
+```
 
 To run the server:
 
