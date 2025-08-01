@@ -325,8 +325,8 @@ def _get_project_path(project_name: str) -> Optional[pathlib.Path]:
     """Gets the root path for a given project name."""
     return PROJECT_ROOTS.get(project_name)
 
-def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
-    """Yields all files under root, skipping common dependency/VCS and binary files."""
+def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_return: int = 1000):
+    """Yields up to max_return files under root, skipping common dependency/VCS and binary files."""
     exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".vscode", ".idea", "dist", "build"}
     binary_extensions = {
         ".zip", ".gz", ".tar", ".rar", ".7z", ".exe", ".dll", ".so", ".a",
@@ -337,25 +337,40 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
     }
     norm_exts = {f".{e.lower().lstrip('.')}" for e in extensions} if extensions else None
 
-    for p in root.rglob('*'):
-        # Check if any part of the path is in the exclude list
-        if any(part in exclude_dirs for part in p.parts):
-            continue
+    from collections import deque
+    dirs_to_scan = deque([root])
+    files_processed = 0
+    files_yielded = 0
+    max_files = 20000  # Hard safety cap
 
-        if not p.is_file():
+    while dirs_to_scan and files_processed < max_files and files_yielded < max_return:
+        current_dir = dirs_to_scan.popleft()
+        try:
+            if current_dir.name in exclude_dirs:
+                continue
+            for item in current_dir.iterdir():
+                files_processed += 1
+                if files_processed >= max_files:
+                    logger.warning(f"[_iter_files] Processed over {max_files} items. Stopping traversal as a safety measure.")
+                    return
+                if files_yielded >= max_return:
+                    return
+                if item.is_dir():
+                    if item.name not in exclude_dirs:
+                        dirs_to_scan.append(item)
+                elif item.is_file():
+                    if item.suffix.lower() in binary_extensions:
+                        continue
+                    item_str = str(item).lower()
+                    if ".windsurf_search_index" in item_str or item_str.endswith(".json"):
+                        continue
+                    if extensions and item.suffix.lower() not in norm_exts:
+                        continue
+                    yield item
+                    files_yielded += 1
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Skipping directory {current_dir} due to access error: {e}")
             continue
-        
-        # Skip binary files
-        if p.suffix.lower() in binary_extensions:
-            continue
-
-        # Exclude .windsurf_search_index and any .json files (case-insensitive)
-        p_str = str(p).lower()
-        if ".windsurf_search_index" in p_str or p_str.endswith(".json"):
-            continue
-        if extensions and p.suffix.lower() not in norm_exts:
-            continue
-        yield p
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Encodes a batch of texts into vector embeddings using the lazily-loaded model."""
@@ -382,7 +397,6 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-@tool_timeout_and_errors(timeout=60)
 def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
     """
     Recursively list files for a given project.
@@ -405,18 +419,15 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
         return []
     results = []
     try:
-        for fp in _iter_files(root, extensions):
-            if len(results) >= max_items:
-                logger.warning("Hit max_items limit of %d. Returning partial results.", max_items)
-                break
+        for fp in _iter_files(root, extensions, max_return=max_items):
             results.append(str(fp.resolve()))
         logger.info("[list_files] Found %d paths.", len(results))
     except Exception as e:
         logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
     return results
 
+@tool_process_timeout_and_errors(timeout=60)
 @mcp.tool()
-@tool_timeout_and_errors(timeout=60)
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -1067,6 +1078,15 @@ class CookbookMultitoolRequest(BaseModel):
     # For 'find' mode
     query: Optional[str] = Field(None, description="Search query for finding patterns (required for 'find').")
 
+class AddToCookbookRequest(BaseModel):
+    pattern_name: str = Field(..., description="Unique name for the pattern.")
+    file_path: str = Field(..., description="Absolute path to the file containing the function.")
+    function_name: str = Field(..., description="Name of the function to save as a pattern.")
+    description: str = Field(..., description="Short description of the pattern.")
+
+class FindInCookbookRequest(BaseModel):
+    query: str = Field(..., description="Search query for finding patterns.")
+
 def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
     logger.info(f"[add_to_cookbook] Adding pattern '{request.pattern_name}' from {request.file_path}::{request.function_name}")
     project_path = _get_project_path("MCP-Server")
@@ -1145,8 +1165,8 @@ def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
         return {"status": "not_found", "message": f"No patterns found matching the query: '{request.query}'"}
     return {"status": "success", "results": matches}
 
+@tool_process_timeout_and_errors(timeout=30)
 @mcp.tool()
-@tool_timeout_and_errors(timeout=30)
 def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     """
     Unified Code Cookbook multitool for adding and searching code patterns.
