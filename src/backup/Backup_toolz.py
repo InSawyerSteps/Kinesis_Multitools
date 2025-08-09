@@ -1,16 +1,66 @@
 """
-MCP Server with a consolidated, multi-modal search tool.
+MCP Server with a consolidated, multi-modal search tool."""
 
-This module provides two primary tools for an AI agent:
-  - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
-  - search: A powerful "multitool" that provides multiple modes of searching:
-    - 'keyword': Literal text search.
-    - 'semantic': Natural language concept search using the vector index.
-    - 'ast': Structural search for definitions (functions, classes).
-    - 'references': Finds all usages of a symbol.
-    - 'similarity': Finds code blocks semantically similar to a given snippet.
-    - 'task_verification': A meta-search to check the implementation status of a task.
-"""
+# --- DEBUG: Enhanced Python Environment Info ---
+import sys
+import os
+import importlib
+import pkgutil
+import site
+
+print("\n=== DEBUG: Python Environment ===")
+print(f"Python Executable: {sys.executable}")
+print(f"Python Version: {sys.version}")
+print(f"Virtual Env: {os.environ.get('VIRTUAL_ENV', 'Not in virtual environment')}")
+print("\n=== sys.path ===")
+for p in sys.path:
+    print(f" - {p}")
+
+print("\n=== Installed Packages ===")
+for m in sorted(sys.modules.keys()):
+    if m.startswith('radon') or m.startswith('_radon') or m in ('mcp', 'fastmcp'):
+        try:
+            mod = sys.modules[m]
+            print(f"{m}: {getattr(mod, '__file__', 'no __file__')}")
+        except Exception as e:
+            print(f"{m}: Error accessing - {str(e)}")
+
+# --- SUPPRESS ALL WARNINGS AND NOISY STARTUP MESSAGES (for Windsurf handshake) ---
+import warnings
+warnings.filterwarnings("ignore")  # Ignore all warnings (Deprecation, User, etc.)
+import os
+os.environ["PYTHONWARNINGS"] = "ignore"
+# Suppress numpy warnings and info
+try:
+    import numpy as _np
+    _np.warnings.filterwarnings("ignore")
+    _np.seterr(all="ignore")
+except Exception:
+    pass
+# Silence bandit warnings if possible
+try:
+    import logging as _logging
+    _logging.getLogger("bandit").setLevel(_logging.ERROR)
+except Exception:
+    pass
+
+import concurrent.futures
+import functools
+import traceback
+import multiprocessing
+import time
+from datetime import datetime, timedelta
+
+# This module provides two primary tools for an AI agent:
+#   - index_project_files: Scans and creates a searchable vector index of the project. This must be run before using semantic search capabilities.
+#   - search: A powerful "multitool" that provides multiple modes of searching:
+#     - 'keyword': Literal text search.
+#     - 'semantic': Natural language concept search using the vector index.
+#     - 'ast': Structural search for definitions (functions, classes).
+#     - 'references': Finds all usages of a symbol.
+#     - 'similarity': Finds code blocks semantically similar to a given snippet.
+#     - 'task_verification': A meta-search to check the implementation status of a task.
+
 import ast
 import json
 import logging
@@ -18,10 +68,121 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set
+import uvicorn
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
+
+# --- Add this block with the other imports ---
+import subprocess
+import difflib
+
+try:
+    print("\n=== DEBUG: Attempting to import radon ===")
+    print("Searching for radon in:")
+    for finder, name, _ in pkgutil.iter_modules():
+        if 'radon' in name:
+            print(f" - Found: {name} at {getattr(finder, 'path', 'unknown path')}")
+    # Try importing with debug info
+    try:
+        import radon
+        print(f"Radon imported successfully from: {radon.__file__}")
+        print(f"Radon version: {getattr(radon, '__version__', 'unknown')}")
+        # Try importing specific modules
+        from radon.cli.harvest import CCHarvester
+        # Radon 6.x defines Config inside radon.cli.__init__, not radon.cli.config
+        from radon.cli import Config
+        print("Radon CLI modules imported successfully")
+        RADON_AVAILABLE = True
+    except Exception as e:
+        print(f"Radon import failed: {type(e).__name__}: {str(e)}")
+        print("Available modules in radon package:")
+        if 'radon' in sys.modules:
+            radon_path = os.path.dirname(sys.modules['radon'].__file__)
+            for item in os.listdir(radon_path):
+                if item.endswith('.py') and not item.startswith('_'):
+                    print(f" - {item}")
+        RADON_AVAILABLE = False
+        CCHarvester = None
+        Config = None
+        # Do not raise here, just mark as unavailable
+except Exception as e:
+    print(f"[DEBUG] Error in radon debug import block: {e}")
+    RADON_AVAILABLE = False
+    CCHarvester = None
+    Config = None
+    # Do not raise here, just mark as unavailable
+    print("\n=== RADON IMPORT FAILED ===")
+    print("Error: ")
+    print("This suggests either:")
+    print("1. Radon is not installed in the current environment")
+    print("2. The installation is corrupted")
+    print("3. There's a version mismatch")
+    print("\nTo fix this, try:")
+    print("1. pip uninstall -y radon")
+    print("2. pip install --no-cache-dir radon==6.0.1")
+    print("3. Verify with: python -c 'import radon; print(radon.__file__)'")
+    print("\nCurrent Python environment:")
+    print(f"  - Executable: {sys.executable}")
+    print(f"  - Path: {sys.path}")
+    
+    CCHarvester = None
+    Config = None
+    RADON_AVAILABLE = False
+
+try:
+    import libcst as cst
+except ImportError:
+    cst = None
+
+from typing import Any, Dict, List, Literal
+
+class AnalysisRequest(BaseModel):
+    path: str
+    analyses: List[Literal["quality", "types", "security", "dead_code", "complexity", "todos"]]
+
+class SuggestTestsRequest(BaseModel):
+    file_path: str = Field(..., description="The absolute path to the file containing the function.")
+    function_name: str = Field(..., description="The name of the function to generate tests for.")
+    model: Optional[str] = Field(None, description="(Optional) Ollama model to use for test generation. Overrides the default if set.")
+
+class AddToCookbookRequest(BaseModel):
+    pattern_name: str = Field(..., description="A unique, file-safe name for the pattern (e.g., 'standard_error_handler').")
+    file_path: str = Field(..., description="The absolute path to the file containing the reference function.")
+    function_name: str = Field(..., description="The name of the reference function to save as a pattern.")
+    description: str = Field(..., description="A clear, one-sentence description of what this pattern does and when to use it.")
+
+class FindInCookbookRequest(BaseModel):
+    query: str = Field(..., description="A natural language query to search for a relevant code pattern.")
+
+# --- End of new imports and models ---
+
+# --- New Tool Request Models ---
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+class IntrospectRequest(BaseModel):
+    mode: Literal[
+        "config", "outline", "stats", "inspect"
+    ] = Field(..., description="The introspection mode to use.")
+    file_path: Optional[str] = Field(None, description="The absolute path to the file for inspection.")
+    # For 'inspect' mode
+    function_name: Optional[str] = Field(None, description="The name of the function to inspect.")
+    class_name: Optional[str] = Field(None, description="The name of the class to inspect.")
+    # For 'config' mode
+    config_type: Optional[Literal["pyproject", "requirements"]] = Field(None, description="The type of config file to read.")
+
+class SnippetRequest(BaseModel):
+    file_path: str = Field(..., description="The absolute path to the file.")
+    mode: Literal["function", "class", "lines"] = Field(..., description="The extraction mode.")
+    # For function/class mode
+    name: Optional[str] = Field(None, description="The name of the function or class to extract.")
+
+    # For lines mode
+    start_line: Optional[int] = Field(None, description="The starting line number (1-indexed).")
+    end_line: Optional[int] = Field(None, description="The ending line number (inclusive).")
+
 
 # --- Dependency Imports ---
 # These are required for the tools to function.
@@ -34,14 +195,21 @@ try:
     from sentence_transformers import SentenceTransformer
     import torch
     
-    # --- Global Model and Device Configuration ---
-    # This setup is done once when the module is loaded for efficiency.
+    # --- Global Model and Device Configuration (with Lazy Loading) ---
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    _ST_MODEL = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
-    
-    # Suppress the noisy INFO log from SentenceTransformer
-    st_logger = logging.getLogger("sentence_transformers.SentenceTransformer")
-    st_logger.setLevel(logging.WARNING)
+    _ST_MODEL_INSTANCE = None
+
+    def _get_st_model():
+        """Lazily loads the SentenceTransformer model on first use."""
+        global _ST_MODEL_INSTANCE
+        if _ST_MODEL_INSTANCE is None:
+            logger.info(f"[Lazy Load] Loading sentence-transformer model 'all-MiniLM-L6-v2' onto device '{DEVICE}'...")
+            _ST_MODEL_INSTANCE = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
+            # Suppress the noisy INFO log from SentenceTransformer after loading
+            st_logger = logging.getLogger("sentence_transformers.SentenceTransformer")
+            st_logger.setLevel(logging.WARNING)
+            logger.info("[Lazy Load] Model loaded successfully.")
+        return _ST_MODEL_INSTANCE
 
     LIBS_AVAILABLE = True
 except ImportError:
@@ -55,12 +223,13 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # FastMCP initialisation & logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp_search_tools")
 
-kinesis_mcp = FastMCP(
-    name="Kinesis_Multitools",
+logger.info("[MCP SERVER IMPORT] Importing src/toolz.py and initializing FastMCP instance...")
+mcp = FastMCP(
+    name="MCP-Server",
 )
+
 
 # ---------------------------------------------------------------------------
 # Project root configuration
@@ -68,7 +237,7 @@ kinesis_mcp = FastMCP(
 # Assumes this file is in 'src/' and the project root is its parent's parent.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_ROOTS: Dict[str, pathlib.Path] = {
-    "Kinesis_Multitools": PROJECT_ROOT,
+    "MCP-Server": PROJECT_ROOT,
 }
 INDEX_DIR_NAME = ".windsurf_search_index"
 
@@ -76,12 +245,80 @@ INDEX_DIR_NAME = ".windsurf_search_index"
 # Core Helper Functions
 # ---------------------------------------------------------------------------
 
+
+import concurrent.futures
+import functools
+import traceback
+import multiprocessing
+import time
+
+def tool_process_timeout_and_errors(timeout=60):
+    """
+    Decorator to run a function in a separate process with a hard timeout and robust error handling.
+    Returns MCP-protocol-compliant error dicts on timeout or exception.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            def target_fn(q, *a, **k):
+                try:
+                    result = func(*a, **k)
+                    q.put(("success", result))
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    q.put(("error", {"status": "error", "message": str(e), "traceback": tb}))
+            q = multiprocessing.Queue()
+            p = multiprocessing.Process(target=target_fn, args=(q, *args), kwargs=kwargs)
+            p.start()
+            try:
+                status, result = q.get(timeout=timeout)
+                p.join(1)
+                if status == "success":
+                    return result
+                else:
+                    logging.error(f"[tool_process_timeout_and_errors] Tool error: {result.get('message')}")
+                    return result
+            except Exception as e:
+                p.terminate()
+                logging.error(f"[tool_process_timeout_and_errors] Tool timed out or crashed: {e}")
+                return {"status": "error", "message": f"Tool timed out after {timeout} seconds or crashed.", "exception": str(e)}
+        return wrapper
+    return decorator
+
+def tool_timeout_and_errors(timeout=60):
+    """
+    Decorator to enforce timeout and robust error handling for MCP tool functions.
+    Logs all exceptions and timeouts. Returns a dict with status and error message on failure.
+    Args:
+        timeout (int): Timeout in seconds for the tool execution.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            logger = logging.getLogger("mcp_search_tools")
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(func, *args, **kwargs)
+                    try:
+                        return future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f"[TIMEOUT] Tool '{func.__name__}' timed out after {timeout} seconds.")
+                        return {"status": "error", "message": f"Tool '{func.__name__}' timed out after {timeout} seconds."}
+            except Exception as e:
+                tb = traceback.format_exc()
+                logger.error(f"[EXCEPTION] Tool '{func.__name__}' failed: {e}\n{tb}")
+                return {"status": "error", "message": f"Tool '{func.__name__}' failed: {e}", "traceback": tb}
+        return wrapper
+    return decorator
+
+
+
 def _get_project_path(project_name: str) -> Optional[pathlib.Path]:
     """Gets the root path for a given project name."""
     return PROJECT_ROOTS.get(project_name)
 
-def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
-    """Yields all files under root, skipping common dependency/VCS and binary files."""
+def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_return: int = 1000):
+    """Yields up to max_return files under root, skipping common dependency/VCS and binary files."""
     exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".vscode", ".idea", "dist", "build"}
     binary_extensions = {
         ".zip", ".gz", ".tar", ".rar", ".7z", ".exe", ".dll", ".so", ".a",
@@ -92,33 +329,49 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
     }
     norm_exts = {f".{e.lower().lstrip('.')}" for e in extensions} if extensions else None
 
-    for p in root.rglob('*'):
-        # Check if any part of the path is in the exclude list
-        if any(part in exclude_dirs for part in p.parts):
-            continue
+    from collections import deque
+    dirs_to_scan = deque([root])
+    files_processed = 0
+    files_yielded = 0
+    max_files = 20000  # Hard safety cap
 
-        if not p.is_file():
+    while dirs_to_scan and files_processed < max_files and files_yielded < max_return:
+        current_dir = dirs_to_scan.popleft()
+        try:
+            if current_dir.name in exclude_dirs:
+                continue
+            for item in current_dir.iterdir():
+                files_processed += 1
+                if files_processed >= max_files:
+                    logger.warning(f"[_iter_files] Processed over {max_files} items. Stopping traversal as a safety measure.")
+                    return
+                if files_yielded >= max_return:
+                    return
+                if item.is_dir():
+                    if item.name not in exclude_dirs:
+                        dirs_to_scan.append(item)
+                elif item.is_file():
+                    if item.suffix.lower() in binary_extensions:
+                        continue
+                    item_str = str(item).lower()
+                    if ".windsurf_search_index" in item_str or item_str.endswith(".json"):
+                        continue
+                    if extensions and item.suffix.lower() not in norm_exts:
+                        continue
+                    yield item
+                    files_yielded += 1
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Skipping directory {current_dir} due to access error: {e}")
             continue
-        
-        # Skip binary files
-        if p.suffix.lower() in binary_extensions:
-            continue
-
-        # Exclude .windsurf_search_index and any .json files (case-insensitive)
-        p_str = str(p).lower()
-        if ".windsurf_search_index" in p_str or p_str.endswith(".json"):
-            continue
-        if extensions and p.suffix.lower() not in norm_exts:
-            continue
-        yield p
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
-    """Encodes a batch of texts into vector embeddings using the loaded model."""
-    if not LIBS_AVAILABLE or _ST_MODEL is None:
+    """Encodes a batch of texts into vector embeddings using the lazily-loaded model."""
+    if not LIBS_AVAILABLE:
         raise RuntimeError("Embedding libraries (torch, sentence-transformers) are not available.")
+    model = _get_st_model()
     logger.info(f"Embedding a batch of {len(texts)} texts on {DEVICE}...")
     with torch.no_grad():
-        return _ST_MODEL.encode(texts, batch_size=32, show_progress_bar=False, device=DEVICE).tolist()
+        return model.encode(texts, batch_size=32, show_progress_bar=False, device=DEVICE).tolist()
 
 def _is_safe_path(path: pathlib.Path) -> bool:
     """Ensure *path* is inside one of the PROJECT_ROOTS roots."""
@@ -132,30 +385,66 @@ def _is_safe_path(path: pathlib.Path) -> bool:
     return False
 
 # ---------------------------------------------------------------------------
-# General-purpose Project Tools (migrated from toolz.py)
+# Project Root Registration Tool
 # ---------------------------------------------------------------------------
 
-@kinesis_mcp.tool()
-def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
+@tool_timeout_and_errors(timeout=10)
+@mcp.tool()
+def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
     """
-    Recursively list files for a given project.
+    Dynamically register a project root at runtime, enabling all project-based tools to operate on the specified folder.
 
     Args:
-        project_name (str): Name of the project as defined in PROJECT_ROOTS (e.g., "MCP-Server").
+        path (str): Absolute path to the folder to register as a project root.
+        project_name (str, optional): Alias for the project. Defaults to the folder name if not provided.
+
+    Returns:
+        dict: Status, message, and current project roots.
+
+    Usage:
+        - Call this tool with the desired path (and optional alias) to register a new project root.
+        - All project-based tools (index, search, read, list) will immediately recognize the new root.
+    """
+    logger.info(f"[anchor_drop] Registering project root: path={path}, project_name={project_name}")
+    try:
+        base_path = pathlib.Path(path).resolve()
+        if not base_path.exists() or not base_path.is_dir():
+            return {"status": "error", "message": f"Path does not exist or is not a directory: {path}"}
+        alias = project_name if project_name else base_path.name
+        PROJECT_ROOTS[alias] = base_path
+        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}")
+        return {
+            "status": "success",
+            "message": f"Registered project root '{alias}' at '{base_path}'.",
+            "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
+        }
+    except Exception as e:
+        logger.error(f"[anchor_drop] Failed to register project root: {e}")
+        return {"status": "error", "message": f"Failed to register project root: {e}"}
+
+# ---------------------------------------------------------------------------
+# General-purpose Project Tools (migrated from toolz.py)
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=60)
+def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> List[str]:
+    """
+    List files under any absolute directory path, optionally filtering by extension.
+
+    Args:
+        directory_path (str): Absolute path to the directory to scan.
         extensions (List[str], optional): List of file extensions to include (e.g., ["py", "md"]). If omitted, all files are included.
         max_items (int, optional): Maximum number of files to return (default: 1000).
 
     Returns:
-        List[str]: Absolute file paths as strings.
-
-    Usage:
-        Use this tool to get a list of all source files in a project, optionally filtered by extension. Useful for building file pickers, search indexes, or for pre-filtering files for other tools.
+        dict: {
+            'status': 'success'|'error',
+            'files': List[str],  # Only present if status == 'success'
+            'message': str       # Error message if status == 'error'
+        }
     """
-    logger.info("[list_files] project=%s extensions=%s", project_name, extensions)
-    root = PROJECT_ROOTS.get(project_name)
-    if not root:
-        logger.error("Invalid project name: %s", project_name)
-        return []
+    import pathlib, os
+    from typing import List, Optional, Dict, Any
     results = []
     try:
         for fp in _iter_files(root, extensions):
@@ -168,7 +457,8 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
         logger.error("Error listing files for project '%s': %s", project_name, e, exc_info=True)
     return results
 
-@kinesis_mcp.tool()
+@mcp.tool()
+@tool_timeout_and_errors(timeout=60)
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
@@ -210,8 +500,9 @@ def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Di
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@kinesis_mcp.tool()
-def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> Dict:
+@tool_process_timeout_and_errors(timeout=300)
+@mcp.tool(name="index_project_files")
+def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> dict:
     """
     Index the project for semantic search **incrementally**.
 
@@ -424,13 +715,12 @@ def index_project_files(project_name: str, subfolder: Optional[str] = None, max_
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: The Search Multitool
 # ---------------------------------------------------------------------------
 
 # --- Pydantic Model for the Unified Search Request ---
 class SearchRequest(BaseModel):
     search_type: Literal[
-        "keyword", "semantic", "ast", "references", "similarity", "task_verification"
+        "keyword", "regex", "semantic", "ast", "references", "similarity", "task_verification"
     ]
     query: str
     project_name: str
@@ -483,6 +773,75 @@ def _search_by_keyword(query: str, project_path: pathlib.Path, params: Dict) -> 
         "results": results,
         "files_scanned": files_scanned
     }
+
+def _search_by_regex(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
+    """
+    Search project files using a regular expression.
+
+    Params dictionary may contain:
+        - includes (List[str]): optional paths relative to project root
+        - extensions (List[str]): file extensions when includes is omitted
+        - ignore_case (bool)
+        - multiline (bool)
+        - dotall (bool)
+        - max_results (int, default 1000)
+    """
+    import logging
+    import re
+    logger = logging.getLogger("mcp_search_tools")
+    flags = 0
+    if params.get("ignore_case"):
+        flags |= re.IGNORECASE
+    if params.get("multiline"):
+        flags |= re.MULTILINE
+    if params.get("dotall"):
+        flags |= re.DOTALL
+
+    try:
+        pattern = re.compile(query, flags)
+    except re.error as exc:
+        return {"status": "error", "message": f"Invalid regex: {exc}"}
+
+    includes = params.get("includes")
+    extensions = params.get("extensions")
+    max_results = params.get("max_results", 1000)
+
+    # Build file list
+    if includes:
+        files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+    else:
+        files = list(_iter_files(project_path, extensions=extensions))
+
+    results = []
+    files_scanned = 0
+
+    for fp in files:
+        logger.debug(f"[regex] Scanning file: {fp}")
+        if ".windsurf_search_index" in str(fp):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, 1):
+                    for match in pattern.finditer(line):
+                        snippet = match.group(0)
+                        if len(snippet) > 200:
+                            snippet = snippet[:200] + "..."
+                        results.append({
+                            "file_path": str(fp),
+                            "line_number": lineno,
+                            "match": snippet,
+                        })
+                        if len(results) >= max_results:
+                            return {
+                                "status": "success",
+                                "results": results,
+                                "files_scanned": files_scanned + 1,
+                            }
+            files_scanned += 1
+        except Exception:
+            continue
+
+    return {"status": "success", "results": results, "files_scanned": files_scanned}
 
 def _search_by_semantic(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Performs semantic search using the FAISS index.
@@ -691,8 +1050,6 @@ def _search_for_references(query: str, project_path: pathlib.Path, params: Dict)
             return {"status": "not_found", "message": "No references found."}
         return {"status": "success", "results": grep_results}
 
-    return {"status": "error", "message": "Not enough parameters for reference search."}
-
 def _search_for_similarity(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Finds code chunks semantically similar to the query block of code."""
     # This is essentially a semantic search where the query is a block of code.
@@ -737,28 +1094,37 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
-@kinesis_mcp.tool(name="search")
+@tool_process_timeout_and_errors(timeout=120)  # Increased timeout for potentially long searches
+@mcp.tool(name="search")
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
-    Multi-modal codebase search tool. Supports keyword, semantic, AST, references, similarity, and task_verification modes.
+    Multi-modal codebase search tool. Supports keyword, regex, semantic, AST, references, similarity, and task_verification modes.
+    This tool enforces a hard timeout and robust error handling using a separate process.
+    If the tool fails or times out, it returns a structured MCP error response.
 
     Args:
         request (SearchRequest):
-            - search_type (str): One of ['keyword', 'semantic', 'ast', 'references', 'similarity', 'task_verification'].
+            - search_type (str): One of ['keyword', 'regex', 'semantic', 'ast', 'references', 'similarity', 'task_verification'].
             - query (str): The search string or code snippet.
             - project_name (str): Name of the project as defined in PROJECT_ROOTS.
             - params (dict, optional):
                 - includes (List[str], optional): Restrict search to these files or folders.
                 - max_results (int, optional): Maximum number of results to return.
-                - extensions (List[str], optional): Filter files by extension (for 'keyword').
+                - extensions (List[str], optional): Filter files by extension (for 'keyword' and 'regex').
+                - ignore_case (bool): Case-insensitive regex search (for 'regex').
+                - multiline (bool): Multiline regex flag (for 'regex').
+                - dotall (bool): Dot matches newline (for 'regex').
                 - target_node_type (str, optional): 'function', 'class', or 'any' (for 'ast').
                 - file_path, line, column (for 'references').
 
     Returns:
-        dict: {'status': 'success'|'error'|'not_found', 'results': list, ...}
+        dict: {
+            'status': 'success'|'error'|'not_found', 'results': list, ...
+        }
 
     Usage:
         - 'keyword': Fast literal search. Supports includes, extensions, max_results.
+        - 'regex': Advanced regex search. Supports includes, extensions, ignore_case, multiline, dotall, max_results.
         - 'semantic': Natural language/code search. Requires prior indexing. Supports includes, max_results.
         - 'ast': Find definitions by structure. Supports includes, target_node_type, max_results.
         - 'references': Find usages of a symbol. Supports includes, file_path, line, column, max_results.
@@ -776,6 +1142,7 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
     # --- Router logic to call the correct internal search function ---
     search_functions = {
         "keyword": _search_by_keyword,
+        "regex": _search_by_regex,
         "semantic": _search_by_semantic,
         "ast": _search_by_ast,
         "references": _search_for_references,
@@ -790,13 +1157,208 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
     else:
         return {"status": "error", "message": "Invalid search type specified."}
 
+# Tool 4: Test Generation
 # ---------------------------------------------------------------------------
-# Main execution block to run the server
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    if not LIBS_AVAILABLE:
-        logger.error("Critical libraries (torch, sentence-transformers, faiss-cpu) are not installed.")
-        logger.error("Please run: pip install faiss-cpu sentence-transformers torch numpy jedi")
+# --- Ollama Model Selection for Test Generation ---
+import os
+
+# Main and fallback models
+_OLLAMA_MAIN_MODEL = "goekdenizguelmez/JOSIEFIED-Qwen3:8b-deepseek-r1-0528"
+_OLLAMA_FALLBACK_MODEL = "qwen3:4b"
+
+# Allow override via environment variable
+OLLAMA_MODEL_FOR_TESTS = os.environ.get("OLLAMA_MODEL_FOR_TESTS", _OLLAMA_MAIN_MODEL)
+
+# === Code Cookbook Tools ===
+COOKBOOK_DIR_NAME = ".project_cookbook"
+
+class CookbookMultitoolRequest(BaseModel):
+    mode: str = Field(..., description="Operation mode: 'add', 'find', 'remove', or 'update'.")
+    # For 'add' and 'update' modes
+    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add', 'remove', 'update').")
+    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add', optional for 'update').")
+    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add', optional for 'update').")
+    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add', optional for 'update').")
+    # For 'find' mode
+    query: Optional[str] = Field(None, description="Search query for finding patterns (required for 'find').")
+
+class AddToCookbookRequest(BaseModel):
+    pattern_name: str = Field(..., description="Unique name for the pattern.")
+    file_path: str = Field(..., description="Absolute path to the file containing the function.")
+    function_name: str = Field(..., description="Name of the function to save as a pattern.")
+    description: str = Field(..., description="Short description of the pattern.")
+
+class FindInCookbookRequest(BaseModel):
+    query: str = Field(..., description="Search query for finding patterns.")
+
+def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
+    logger.info(f"[add_to_cookbook] Adding pattern '{request.pattern_name}' from {request.file_path}::{request.function_name}")
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    cookbook_dir.mkdir(exist_ok=True)
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    output_path = cookbook_dir / safe_filename
+    if output_path.exists():
+        return {"status": "error", "message": f"Pattern '{request.pattern_name}' already exists at {output_path}"}
+    source_file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(source_file_path):
+        return {"status": "error", "message": "Access denied: Source file path is outside configured project roots."}
+    if not source_file_path.is_file():
+        return {"status": "error", "message": f"Source file not found at: {request.file_path}"}
+    try:
+        source_code_text = source_file_path.read_text("utf-8")
+        tree = ast.parse(source_code_text)
+        class FunctionFinder(ast.NodeVisitor):
+            def __init__(self, target_name):
+                self.target_name = target_name
+                self.found_node = None
+            def visit_FunctionDef(self, node):
+                if node.name == self.target_name:
+                    self.found_node = node
+                self.generic_visit(node)
+        finder = FunctionFinder(request.function_name)
+        finder.visit(tree)
+        if not finder.found_node:
+            return {"status": "error", "message": f"Could not find function '{request.function_name}' in '{request.file_path}'."}
+        function_source = ast.get_source_segment(source_code_text, finder.found_node)
+        if not function_source:
+             return {"status": "error", "message": f"Could not extract source for function '{request.function_name}'."}
+    except Exception as e:
+        logger.error(f"[add_to_cookbook] AST parsing failed for {request.file_path}: {e}")
+        return {"status": "error", "message": f"Failed to parse or read source file: {e}"}
+    pattern_data = {
+        "pattern_name": request.pattern_name,
+        "description": request.description,
+        "source_file": request.file_path,
+        "function_name": request.function_name,
+        "source_code": function_source,
+        "added_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(pattern_data, f, indent=4)
+        logger.info(f"[add_to_cookbook] Successfully saved pattern to {output_path}")
+        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was successfully added to the cookbook."}
+    except Exception as e:
+        logger.error(f"[add_to_cookbook] Failed to write pattern file {output_path}: {e}")
+        return {"status": "error", "message": f"Failed to write pattern file: {e}"}
+
+def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
+    logger.info(f"[find_in_cookbook] Searching for pattern with query: '{request.query}'")
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    if not cookbook_dir.is_dir():
+        return {"status": "not_found", "message": "Cookbook directory does not exist. Add a pattern first."}
+    matches = []
+    query_lower = request.query.lower()
+    for pattern_file in cookbook_dir.glob("*.json"):
+        try:
+            with open(pattern_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            searchable_text = f"{data.get('pattern_name', '')} {data.get('description', '')} {data.get('function_name', '')}".lower()
+            if query_lower in searchable_text:
+                matches.append(data)
+        except Exception as e:
+            logger.warning(f"[find_in_cookbook] Could not read or parse pattern file {pattern_file}: {e}")
+            continue
+    if not matches:
+        return {"status": "not_found", "message": f"No patterns found matching the query: '{request.query}'"}
+    return {"status": "success", "results": matches}
+
+
+def _remove_from_cookbook_impl(pattern_name: str) -> dict:
+    """
+    Removes a pattern from the cookbook by pattern_name.
+    Returns success or error dict.
+    """
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{pattern_name}' does not exist."}
+    try:
+        pattern_path.unlink()
+        return {"status": "success", "message": f"Pattern '{pattern_name}' was removed from the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to remove pattern: {e}"}
+
+
+def _update_cookbook_pattern_impl(request: CookbookMultitoolRequest) -> dict:
+    """
+    Updates a pattern in the cookbook by pattern_name. Only provided fields are updated.
+    Returns success or error dict.
+    """
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{request.pattern_name}' does not exist."}
+    try:
+        with open(pattern_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Only update fields that are provided
+        if request.file_path:
+            data["source_file"] = request.file_path
+        if request.function_name:
+            data["function_name"] = request.function_name
+        if request.description:
+            data["description"] = request.description
+        with open(pattern_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was updated in the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update pattern: {e}"}
+
+@tool_process_timeout_and_errors(timeout=30)
+@mcp.tool()
+def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
+    """
+    Unified Code Cookbook multitool for adding, searching, removing, and updating code patterns.
+
+    Args:
+        request (CookbookMultitoolRequest):
+            - mode (str): 'add' to save a new pattern, 'find' to search for patterns, 'remove' to remove a pattern, 'update' to update a pattern.
+            - pattern_name (str, required for 'add', 'remove', 'update'): Unique name for the pattern.
+            - file_path (str, required for 'add', optional for 'update'): Absolute path to the file containing the function.
+            - function_name (str, required for 'add', optional for 'update'): Name of the function to save.
+            - description (str, required for 'add', optional for 'update'): Description of the pattern.
+            - query (str, required for 'find'): Search query for finding patterns.
+
+    Returns:
+        dict: Status and results or error message.
+
+    Usage:
+        - To add: mode='add', pattern_name, file_path, function_name, description
+        - To find: mode='find', query
+        - To remove: mode='remove', pattern_name
+        - To update: mode='update', pattern_name, file_path, function_name, description
+    """
+    logger.info(f"[cookbook_multitool] mode={request.mode}")
+    if request.mode == "add":
+        missing = [f for f in ["pattern_name", "file_path", "function_name", "description"] if getattr(request, f) is None]
+        if missing:
+            return {"status": "error", "message": f"Missing required fields for 'add': {', '.join(missing)}"}
+        add_req = AddToCookbookRequest(
+            pattern_name=request.pattern_name,
+            file_path=request.file_path,
+            function_name=request.function_name,
+            description=request.description
+        )
+        return _add_to_cookbook_impl(add_req)
+    elif request.mode == "find":
+        if not request.query:
+            return {"status": "error", "message": "Missing 'query' for 'find' mode."}
+        find_req = FindInCookbookRequest(query=request.query)
+        return _find_in_cookbook_impl(find_req)
+    elif request.mode == "remove":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'remove' mode."}
+        return _remove_from_cookbook_impl(request.pattern_name)
+    elif request.mode == "update":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'update' mode."}
+        return _update_cookbook_pattern_impl(request)
     else:
-        logger.info("Starting Project Search & Index MCP Server...")
-        kinesis_mcp.run()
+        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
