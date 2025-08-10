@@ -1,0 +1,17 @@
+{
+    "pattern_name": "iter_files_with_filters",
+    "description": "Iterate files under a root with excluded directories, binary extension filtering, optional extensions, and hard safety caps.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "_iter_files"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_return: int = 1000):\n    \"\"\"Yields up to max_return files under root, skipping common dependency/VCS and binary files.\"\"\"\n    exclude_dirs = {\".git\", \".venv\", \"venv\", \"__pycache__\", \"node_modules\", \".vscode\", \".idea\", \"dist\", \"build\"}\n    binary_extensions = {\n        \".zip\", \".gz\", \".tar\", \".rar\", \".7z\", \".exe\", \".dll\", \".so\", \".a\",\n        \".png\", \".jpg\", \".jpeg\", \".gif\", \".bmp\", \".tiff\", \".pdf\", \".doc\",\n        \".docx\", \".ppt\", \".pptx\", \".xls\", \".xlsx\", \".pyc\", \".pyo\", \".db\",\n        \".sqlite\", \".sqlite3\", \".iso\", \".img\", \".mp3\", \".mp4\", \".avi\",\n        \".mkv\", \".mov\"\n    }\n    norm_exts = {f\".{e.lower().lstrip('.')}\" for e in extensions} if extensions else None\n\n    from collections import deque\n    dirs_to_scan = deque([root])\n    files_processed = 0\n    files_yielded = 0\n    max_files = 20000  # Hard safety cap\n\n    while dirs_to_scan and files_processed < max_files and files_yielded < max_return:\n        current_dir = dirs_to_scan.popleft()\n        try:\n            if current_dir.name in exclude_dirs:\n                continue\n            for item in current_dir.iterdir():\n                files_processed += 1\n                if files_processed >= max_files:\n                    logger.warning(f\"[_iter_files] Processed over {max_files} items. Stopping traversal as a safety measure.\")\n                    return\n                if files_yielded >= max_return:\n                    return\n                if item.is_dir():\n                    if item.name not in exclude_dirs:\n                        dirs_to_scan.append(item)\n                elif item.is_file():\n                    if item.suffix.lower() in binary_extensions:\n                        continue\n                    item_str = str(item).lower()\n                    if \".windsurf_search_index\" in item_str or item_str.endswith(\".json\"):\n                        continue\n                    if extensions and item.suffix.lower() not in norm_exts:\n                        continue\n                    yield item\n                    files_yielded += 1\n        except (PermissionError, OSError) as e:\n            logger.warning(f\"Skipping directory {current_dir} due to access error: {e}\")\n            continue",
+    "created_at": "2025-08-10T05:44:01Z",
+    "updated_at": "2025-08-10T05:44:01Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_iter_files",
+    "added_at_utc": "2025-08-10T05:44:01Z"
+}

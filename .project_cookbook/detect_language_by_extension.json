@@ -1,0 +1,12 @@
+{
+    "pattern_name": "detect_language_by_extension",
+    "description": "Lightweight language detection from file extension with an override hook.",
+    "language": "python",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "from pathlib import Path\n\ndef detect_language(file_path: str, override: str | None = None) -> str:\n    if override:\n        return override\n    ext = Path(file_path).suffix.lower()\n    return {\n        '.py': 'python',\n        '.js': 'javascript',\n        '.ts': 'typescript',\n        '.html': 'html',\n        '.json': 'json',\n        '.md': 'text',\n        '.txt': 'text',\n    }.get(ext, 'auto')\n",
+    "created_at": "2025-08-10T05:37:15Z",
+    "updated_at": "2025-08-10T05:37:15Z"
+}

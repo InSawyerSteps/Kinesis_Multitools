@@ -1,0 +1,12 @@
+{
+    "pattern_name": "html_marker_or_script_block_extraction",
+    "description": "Extract HTML snippet either between custom markers or from <script> blocks containing a token/name.",
+    "language": "python",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "import re\nfrom typing import Optional\n\nSCRIPT_RE = re.compile(r\"<script[^>]*>([\\s\\S]*?)</script>\", re.IGNORECASE)\n\n\ndef extract_between_markers(text: str, start_marker: str, end_marker: str) -> Optional[str]:\n    if not text or not start_marker or not end_marker:\n        return None\n    start = text.find(start_marker)\n    if start == -1:\n        return None\n    end = text.find(end_marker, start + len(start_marker))\n    if end == -1:\n        return None\n    return text[start + len(start_marker): end]\n\n\ndef extract_script_block_with(text: str, token: str) -> Optional[str]:\n    if not text or not token:\n        return None\n    for m in SCRIPT_RE.finditer(text):\n        if token in m.group(1):\n            return m.group(0)\n    return None\n",
+    "created_at": "2025-08-10T05:37:14Z",
+    "updated_at": "2025-08-10T05:37:14Z"
+}

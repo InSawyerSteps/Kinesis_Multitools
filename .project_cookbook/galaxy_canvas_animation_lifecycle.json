@@ -1,0 +1,17 @@
+{
+    "pattern_name": "galaxy_canvas_animation_lifecycle",
+    "description": "Robust canvas animation setup in JS: DPR scaling, safe resize using getBoundingClientRect with parent fallback, regenerate procedural assets on resize, layered draw, RAF loop with stop guard and cleanup.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "galaxy_canvas_animation_lifecycle"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function galaxy_canvas_animation_lifecycle(canvas) {\n  const ctx = canvas.getContext('2d');\n  const dpr = Math.max(1, window.devicePixelRatio || 1);\n  let raf = 0;\n\n  function resize() {\n    let r = canvas.getBoundingClientRect();\n    if ((r.width === 0 || r.height === 0) && canvas.parentElement) {\n      r = canvas.parentElement.getBoundingClientRect();\n    }\n    canvas.width = Math.max(1, Math.floor(r.width * dpr));\n    canvas.height = Math.max(1, Math.floor(r.height * dpr));\n    regenerate();\n  }\n\n  let stars = [];\n  function regenerate() {\n    const count = Math.max(240, Math.floor(canvas.width * canvas.height * 0.00025));\n    stars = Array.from({ length: count }, () => ({\n      x: Math.random(), y: Math.random(), s: Math.random()*1.2 + 0.3\n    }));\n  }\n\n  function draw(ts) {\n    ctx.clearRect(0, 0, canvas.width, canvas.height);\n    ctx.fillStyle = '#000';\n    ctx.fillRect(0, 0, canvas.width, canvas.height);\n    ctx.fillStyle = '#fff';\n    for (const st of stars) {\n      const x = Math.floor(st.x * canvas.width);\n      const y = Math.floor(st.y * canvas.height);\n      ctx.fillRect(x, y, 1, 1);\n    }\n    raf = requestAnimationFrame(draw);\n  }\n\n  window.addEventListener('resize', resize);\n  resize();\n  raf = requestAnimationFrame(draw);\n\n  return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', resize); };\n}",
+    "created_at": "2025-08-10T05:28:01Z",
+    "updated_at": "2025-08-10T05:28:01Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "galaxy_canvas_animation_lifecycle",
+    "added_at_utc": "2025-08-10T05:28:01Z"
+}

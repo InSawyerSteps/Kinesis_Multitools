@@ -1,0 +1,17 @@
+{
+    "pattern_name": "avoid_temporal_dead_zone",
+    "description": "Declare variables before first use when referenced by inner functions called during init; avoids TDZ errors like 'Cannot access X before initialization'.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "avoid_temporal_dead_zone"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function avoid_temporal_dead_zone() {\n  let deps = [];\n  function init() { use(); }\n  function use() { deps.push(1); }\n  init();\n  return deps.length;\n}",
+    "created_at": "2025-08-10T05:30:27Z",
+    "updated_at": "2025-08-10T05:30:27Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "avoid_temporal_dead_zone",
+    "added_at_utc": "2025-08-10T05:30:27Z"
+}

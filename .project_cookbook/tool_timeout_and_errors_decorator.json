@@ -1,0 +1,17 @@
+{
+    "pattern_name": "tool_timeout_and_errors_decorator",
+    "description": "Decorator to run MCP tool code with thread timeout and robust exception handling returning structured error dicts.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "tool_timeout_and_errors"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def tool_timeout_and_errors(timeout=60):\n    \"\"\"\n    Decorator to enforce timeout and robust error handling for MCP tool functions.\n    Logs all exceptions and timeouts. Returns a dict with status and error message on failure.\n    Args:\n        timeout (int): Timeout in seconds for the tool execution.\n    \"\"\"\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            logger = logging.getLogger(\"mcp_search_tools\")\n            try:\n                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:\n                    future = executor.submit(func, *args, **kwargs)\n                    try:\n                        return future.result(timeout=timeout)\n                    except concurrent.futures.TimeoutError:\n                        logger.error(f\"[TIMEOUT] Tool '{func.__name__}' timed out after {timeout} seconds.\")\n                        return {\"status\": \"error\", \"message\": f\"Tool '{func.__name__}' timed out after {timeout} seconds.\"}\n            except Exception as e:\n                tb = traceback.format_exc()\n                logger.error(f\"[EXCEPTION] Tool '{func.__name__}' failed: {e}\\n{tb}\")\n                return {\"status\": \"error\", \"message\": f\"Tool '{func.__name__}' failed: {e}\", \"traceback\": tb}\n        return wrapper\n    return decorator",
+    "created_at": "2025-08-10T05:44:01Z",
+    "updated_at": "2025-08-10T05:44:01Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "tool_timeout_and_errors",
+    "added_at_utc": "2025-08-10T05:44:01Z"
+}

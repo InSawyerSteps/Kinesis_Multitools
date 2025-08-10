@@ -1,0 +1,17 @@
+{
+    "pattern_name": "bidirectional_link_creation_in_modal",
+    "description": "Create reciprocal links when linking items in UI flows; skip self-links and ensure idempotency by checking existing links on both sides.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "bidirectional_link_creation_in_modal"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function bidirectional_link_creation_in_modal(data, sourceId, targetId, type = 'related') {\n  const source = data.find(i => i.id === sourceId);\n  const target = data.find(i => i.id === targetId);\n  if (!source || !target || source.id === target.id) return false;\n  source.links = source.links || [];\n  target.links = target.links || [];\n  if (!source.links.some(l => l.targetId === target.id)) {\n    source.links.push({ targetId: target.id, type });\n  }\n  if (!target.links.some(l => l.targetId === source.id)) {\n    target.links.push({ targetId: source.id, type });\n  }\n  return true;\n}",
+    "created_at": "2025-08-10T05:30:10Z",
+    "updated_at": "2025-08-10T05:30:10Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "bidirectional_link_creation_in_modal",
+    "added_at_utc": "2025-08-10T05:30:10Z"
+}

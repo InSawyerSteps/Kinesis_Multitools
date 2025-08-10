@@ -1,0 +1,17 @@
+{
+    "pattern_name": "defer_canvas_start_next_frame",
+    "description": "Use requestAnimationFrame to defer heavy canvas start until layout settles, preventing zero-sized rect issues.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "defer_canvas_start_next_frame"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function defer_canvas_start_next_frame(start, canvas) {\n  requestAnimationFrame(() => start(canvas));\n}",
+    "created_at": "2025-08-10T05:30:27Z",
+    "updated_at": "2025-08-10T05:30:27Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "defer_canvas_start_next_frame",
+    "added_at_utc": "2025-08-10T05:30:27Z"
+}

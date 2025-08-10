@@ -8,6 +8,7 @@
 > - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range (see below).
 > - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files (see below).
 > - File read/list utilities: Safe recursive listing and reading of project files.
+> - `anchor_drop`: Persistently register external project roots for safe tool access across restarts.
 
 ---
 
@@ -28,14 +29,18 @@ The `cookbook_multitool` is a unified endpoint for capturing and searching canon
 - **Find** patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
 
 ### Request Schema
-- `mode` (`str`): Either `"add"` or `"find"`. Required.
-- For `add` mode:
-    - `pattern_name` (`str`): Unique name for the pattern. Required.
-    - `file_path` (`str`): Absolute path to the file containing the function. Required.
-    - `function_name` (`str`): Name of the function to save. Required.
-    - `description` (`str`): Description of the pattern. Required.
+- `mode` (str): `"add"` or `"find"`. Required.
+- For `add` mode (multi-language):
+    - `pattern_name` (str): Unique name for the pattern. Required.
+    - `description` (str): Human-readable description. Required.
+    - One of the following extraction strategies:
+        * `file_path` (str) + `function_name` (str): Extract a function/class by name. Language auto-detected by extension; override with `language`.
+        * `file_path` (str) + `start_marker` (str) + `end_marker` (str): Extract code between markers (HTML/JSON/text supported).
+        * `code_snippet` (str): Store a raw snippet directly (JSON/text supported).
+    - `language` (str, optional): One of `python`, `javascript`, `typescript`, `html`, `json`, `text`. If omitted, detected from `file_path`.
 - For `find` mode:
-    - `query` (`str`): Search query for finding patterns. Required.
+    - `query` (str): Search query for names/descriptions/function names. Required.
+    - `language` (str, optional): Filter results by language.
 
 ### Example Usage
 
@@ -43,10 +48,35 @@ The `cookbook_multitool` is a unified endpoint for capturing and searching canon
 ```json
 {
   "mode": "add",
-  "pattern_name": "My Golden Pattern",
+  "pattern_name": "secure_path_validator",
   "file_path": "C:/Projects/MCP Server/src/toolz.py",
   "function_name": "_is_safe_path",
-  "description": "A canonical function for secure path validation."
+  "description": "Ensures a path stays within registered project roots.",
+  "language": "python"
+}
+```
+
+#### Add from HTML markers
+```json
+{
+  "mode": "add",
+  "pattern_name": "form_validate_handler",
+  "file_path": "C:/Projects/site/index.html",
+  "start_marker": "<!-- VALIDATE_START -->",
+  "end_marker": "<!-- VALIDATE_END -->",
+  "description": "Client-side validation handler in script block.",
+  "language": "html"
+}
+```
+
+#### Add a raw JSON snippet
+```json
+{
+  "mode": "add",
+  "pattern_name": "pytest_config",
+  "code_snippet": "{\n  \"pytest\": { \"addopts\": \"-q\" }\n}",
+  "description": "Minimal pytest JSON config.",
+  "language": "json"
 }
 ```
 
@@ -54,20 +84,78 @@ The `cookbook_multitool` is a unified endpoint for capturing and searching canon
 ```json
 {
   "mode": "find",
-  "query": "secure path"
+  "query": "secure path",
+  "language": "python"
 }
 ```
 
 ### Response
 - On success, returns a status and message (for add), or a list of matching patterns (for find).
-- Cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
+- Stored metadata includes `language`, `extraction_strategy`, and a `locator` for how it was extracted (function name, markers, or direct snippet).
+- Patterns are stored as JSON files under `.project_cookbook/` in the project root.
 
 ### Best Practices
 - Use descriptive, unique pattern names to avoid collisions.
 - Store only canonical, well-tested functions as cookbook patterns.
 - Use the find mode to enforce code consistency and accelerate onboarding.
 
-See the README for a summary and user-facing instructions.
+## Project Roots Persistence & Path Safety
+
+All file operations are sandboxed to registered project roots to ensure security and predictable behavior.
+
+### Persistence
+- Registered roots are saved to `.project_roots.json` in the server root.
+- The MCP-Server root is always included by default.
+- Roots are loaded on startup and validated (existence, normalization).
+
+### Registering roots with `anchor_drop`
+Use the `anchor_drop` tool to add an external project root (optionally with an alias) and persist it across restarts.
+
+Example request:
+```json
+{
+  "path": "C:/Projects/AnotherRepo",
+  "project_name": "AnotherRepo"
+}
+```
+
+Example response includes `status`, `message`, and the updated `project_roots` mapping.
+
+### Path validation
+- The canonical safety check `'_is_safe_path'` ensures any file path used by tools resolves inside one of the registered roots (prevents traversal or escape).
+- Tools must reject operations on paths outside these roots and return a clear error message.
+
+### Best practices
+- Prefer passing logical project aliases where supported to simplify requests.
+- Avoid duplicate registrations; the tool handles de-duplication and returns an informative message.
+
+### Manual Testing Checklist (Quick)
+- __anchor_drop__: Register an external root and confirm persistence in `.project_roots.json`.
+  - Expect `status: success`, updated `project_roots` mapping.
+- __index_project_files__: Run once, then modify 1-2 files and re-run.
+  - Expect `updated_files` > 0 only on the second run; `unchanged_files` dominates.
+- __search__:
+  - `keyword`: Query a known symbol; expect file hits.
+  - `regex`: Provide a simple regex; expect matching lines.
+  - `semantic`: If index exists, expect relevant chunks; otherwise a clear error to index first.
+  - `ast`: Query a known function/class name; expect structured results.
+  - `references` (if configured): Provide file/line/column for a symbol; expect usages.
+  - `similarity`: Provide a code snippet; expect similar blocks.
+  - `task_verification`: Provide a task sentence; expect presence/absence assessment.
+- __cookbook_multitool__:
+  - `add` (Python): `file_path` + `function_name` for a known function.
+  - `add` (HTML markers): `start_marker`/`end_marker` in an HTML file.
+  - `add` (raw JSON): `code_snippet` with `language: json`.
+  - `find`: Query by keywords; optionally filter by `language`.
+- __get_snippet__: Test `mode: function`, `mode: class`, and `mode: lines`.
+  - Expect `status`, `snippet`, and helpful `message` when not found.
+- __introspect__:
+  - `config` with `requirements`.
+  - `outline` on a Python file.
+  - `stats` and `inspect` for a known symbol.
+- __file read/list utilities__: List project files and read a small text file; verify path safety rejects out-of-root paths.
+
+---
 
 ## Overview
 This guide is your blueprint for extending `toolz.py` with advanced, multi-command "mega-tools" for the MCP Server. It covers:

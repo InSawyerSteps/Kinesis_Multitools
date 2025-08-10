@@ -1,0 +1,17 @@
+{
+    "pattern_name": "persistent_project_roots_save",
+    "description": "Save project roots mapping to .project_roots.json with pretty formatting and robust error handling.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "_save_project_roots"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def _save_project_roots(roots: Dict[str, pathlib.Path]) -> bool:\n    \"\"\"Save project roots to persistent storage.\"\"\"\n    try:\n        # Convert pathlib.Path objects to strings for JSON serialization\n        config = {name: str(path) for name, path in roots.items()}\n        \n        # Create parent directory if it doesn't exist\n        PROJECT_ROOTS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)\n        \n        # Write with pretty formatting\n        with open(PROJECT_ROOTS_CONFIG_FILE, \"w\", encoding=\"utf-8\") as f:\n            json.dump(config, f, indent=2, sort_keys=True)\n        \n        logger.info(f\"[project_roots] Saved {len(config)} project roots to {PROJECT_ROOTS_CONFIG_FILE}\")\n        return True\n        \n    except Exception as e:\n        logger.error(f\"[project_roots] Failed to save config file: {e}\")\n        return False",
+    "created_at": "2025-08-10T05:36:40Z",
+    "updated_at": "2025-08-10T05:36:40Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_save_project_roots",
+    "added_at_utc": "2025-08-10T05:36:40Z"
+}

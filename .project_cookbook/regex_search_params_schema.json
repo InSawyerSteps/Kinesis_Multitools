@@ -1,0 +1,12 @@
+{
+    "pattern_name": "regex_search_params_schema",
+    "description": "Parameter shape for regex search mode with flags and limits.",
+    "language": "json",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "{\n  \"search_type\": \"regex\",\n  \"params\": {\n    \"includes\": [\"optional/relative/paths\"],\n    \"extensions\": [\"py\", \"md\"],\n    \"ignore_case\": true,\n    \"multiline\": false,\n    \"dotall\": false,\n    \"max_results\": 1000\n  }\n}",
+    "created_at": "2025-08-10T05:44:05Z",
+    "updated_at": "2025-08-10T05:44:05Z"
+}

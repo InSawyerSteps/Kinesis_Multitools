@@ -1,0 +1,12 @@
+{
+    "pattern_name": "incremental_indexing_metadata_schema",
+    "description": "Schema and process outline for incremental FAISS indexing metadata entries and rebuild strategy.",
+    "language": "json",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "{\n  \"metadata_entry\": {\n    \"path\": \"relative/path/to/file.py\",\n    \"content\": \"<chunk text>\",\n    \"vector\": [0.0, 0.1, \"...float32\"],\n    \"file_mtime\": 1719690000.123,\n    \"file_size\": 2048\n  },\n  \"process\": [\n    \"Load prior index + metadata\",\n    \"Collect current project files\",\n    \"Compare mtime/size to detect added/modified/deleted\",\n    \"Re-chunk + embed only updates\",\n    \"Rebuild fresh FAISS index from reused + new vectors\"\n  ]\n}",
+    "created_at": "2025-08-10T05:44:04Z",
+    "updated_at": "2025-08-10T05:44:04Z"
+}

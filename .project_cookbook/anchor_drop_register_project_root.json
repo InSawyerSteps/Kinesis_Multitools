@@ -1,0 +1,17 @@
+{
+    "pattern_name": "anchor_drop_register_project_root",
+    "description": "MCP tool to register and persist a project root (with optional alias) across restarts; updates in-memory roots and saves to JSON.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "anchor_drop"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:\n    \"\"\"\n    Dynamically register a project root at runtime with persistent storage, enabling all project-based tools to operate on the specified folder.\n    The registration persists across MCP server restarts.\n\n    Args:\n        path (str): Absolute path to the folder to register as a project root.\n        project_name (str, optional): Alias for the project. Defaults to the folder name if not provided.\n\n    Returns:\n        dict: Status, message, and current project roots.\n\n    Usage:\n        - Call this tool with the desired path (and optional alias) to register a new project root.\n        - All project-based tools (index, search, read, list) will immediately recognize the new root.\n        - The registration is saved to .project_roots.json and persists across server restarts.\n    \"\"\"\n    logger.info(f\"[anchor_drop] Registering project root: path={path}, project_name={project_name}\")\n    try:\n        base_path = pathlib.Path(path).resolve()\n        if not base_path.exists() or not base_path.is_dir():\n            return {\"status\": \"error\", \"message\": f\"Path does not exist or is not a directory: {path}\"}\n        \n        alias = project_name if project_name else base_path.name\n        \n        # Check if already registered\n        if alias in PROJECT_ROOTS and PROJECT_ROOTS[alias] == base_path:\n            return {\n                \"status\": \"success\", \n                \"message\": f\"Project root '{alias}' is already registered at '{base_path}'.\",\n                \"project_roots\": {k: str(v) for k, v in PROJECT_ROOTS.items()}\n            }\n        \n        # Add to in-memory registry\n        PROJECT_ROOTS[alias] = base_path\n        \n        # Persist to disk\n        if _save_project_roots(PROJECT_ROOTS):\n            persistence_msg = \" (persisted to disk)\"\n        else:\n            persistence_msg = \" (WARNING: failed to persist to disk)\"\n        \n        logger.info(f\"[anchor_drop] Registered project root: {alias} -> {base_path}{persistence_msg}\")\n        return {\n            \"status\": \"success\",\n            \"message\": f\"Registered project root '{alias}' at '{base_path}'{persistence_msg}.\",\n            \"project_roots\": {k: str(v) for k, v in PROJECT_ROOTS.items()}\n        }\n    except Exception as e:\n        logger.error(f\"[anchor_drop] Failed to register project root: {e}\")\n        return {\"status\": \"error\", \"message\": f\"Failed to register project root: {e}\"}",
+    "created_at": "2025-08-10T05:36:42Z",
+    "updated_at": "2025-08-10T05:36:42Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "anchor_drop",
+    "added_at_utc": "2025-08-10T05:36:42Z"
+}

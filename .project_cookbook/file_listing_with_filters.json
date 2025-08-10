@@ -1,0 +1,17 @@
+{
+    "pattern_name": "file_listing_with_filters",
+    "description": "List files from a registered project root with extension filtering, safety caps, and structured response.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "list_project_files"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> Dict[str, Any]:\n    \"\"\"\n    List files under a registered project root (supports dynamic roots via anchor_drop),\n    optionally filtering by extension.\n\n    Args:\n        project_name (str): Name of the registered project (see PROJECT_ROOTS / anchor_drop).\n        extensions (List[str], optional): List of file extensions to include (e.g., [\"py\", \"md\"]). If omitted, all files are included.\n        max_items (int, optional): Maximum number of files to return (default: 1000).\n\n    Returns:\n        dict: {\n            'status': 'success'|'error',\n            'files': List[str],        # Only present if status == 'success'\n            'count': int,              # Number of files returned\n            'project_root': str,       # Absolute path to root used\n            'message': str             # Error message if status == 'error'\n        }\n    \"\"\"\n    results: List[str] = []\n    try:\n        project_path = _get_project_path(project_name)\n        if project_path is None:\n            available = \", \".join(sorted(PROJECT_ROOTS.keys()))\n            msg = f\"Unknown project '{project_name}'. Available projects: [{available}]\"\n            logger.error(\"[list_project_files] %s\", msg)\n            return {\"status\": \"error\", \"message\": msg}\n\n        for fp in _iter_files(project_path, extensions, max_return=max_items):\n            results.append(str(fp.resolve()))\n\n        logger.info(\"[list_project_files] Found %d paths for project '%s' at root %s.\", len(results), project_name, project_path)\n        return {\n            \"status\": \"success\",\n            \"files\": results,\n            \"count\": len(results),\n            \"project_root\": str(project_path),\n        }\n    except Exception as e:\n        logger.error(\"[list_project_files] Error listing files for project '%s': %s\", project_name, e, exc_info=True)\n        return {\"status\": \"error\", \"message\": str(e)}",
+    "created_at": "2025-08-10T05:44:01Z",
+    "updated_at": "2025-08-10T05:44:01Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "list_project_files",
+    "added_at_utc": "2025-08-10T05:44:01Z"
+}

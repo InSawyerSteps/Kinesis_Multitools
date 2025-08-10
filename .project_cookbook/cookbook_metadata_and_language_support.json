@@ -1,0 +1,12 @@
+{
+    "pattern_name": "cookbook_metadata_and_language_support",
+    "description": "Reference JSON describing cookbook entry metadata fields and multi-language extraction strategies.",
+    "language": "json",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "{\n  \"pattern\": \"cookbook_entry_metadata\",\n  \"fields\": {\n    \"language\": \"python|javascript|typescript|html|json|text|auto\",\n    \"extraction_strategy\": \"python_function|js_function_regex|html_markers|raw_snippet\",\n    \"locator\": {\n      \"file_path\": \"absolute or project-relative\",\n      \"function_name\": \"optional\",\n      \"class_name\": \"optional\",\n      \"start_marker\": \"optional\",\n      \"end_marker\": \"optional\"\n    }\n  },\n  \"notes\": [\n    \"JS/TS extraction uses regex with brace balancing.\",\n    \"HTML supports <script> extraction or marker-based.\",\n    \"JSON/Text snippets stored directly.\"\n  ]\n}",
+    "created_at": "2025-08-10T05:36:45Z",
+    "updated_at": "2025-08-10T05:36:45Z"
+}

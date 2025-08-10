@@ -1,0 +1,12 @@
+{
+    "pattern_name": "js_ts_function_extractor_brace_balance",
+    "description": "Extract a JavaScript/TypeScript function by name using regex for the header and brace balancing to capture the full body.",
+    "language": "javascript",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "// Extract a JS/TS function (declaration or arrow) by name with brace balancing\nexport function extractFunctionByName(source, name) {\n  if (typeof source !== 'string' || !name) return null;\n  // Patterns: function name( ... ) { ... }\n  //           const name = (...) => { ... }\n  //           function name\\s*<T>(...) { ... } (TS generics)\n  const patterns = [\n    new RegExp(String.raw`function\\s+${name}\\s*(?:<[^>]*>)?\\s*\\(`, 'm'),\n    new RegExp(String.raw`(?:const|let|var)\\s+${name}\\s*=\\s*\\([^)]*\\)\\s*=>\\s*\\{`, 'm'),\n  ];\n  let startIdx = -1;\n  let headerEnd = -1;\n  for (const pat of patterns) {\n    const m = pat.exec(source);\n    if (m) {\n      startIdx = m.index;\n      // Find the first opening brace after the header\n      const braceIdx = source.indexOf('{', m.index);\n      if (braceIdx !== -1) {\n        headerEnd = braceIdx;\n        break;\n      }\n    }\n  }\n  if (startIdx === -1 || headerEnd === -1) return null;\n  // Balance braces starting at headerEnd\n  let i = headerEnd;\n  let depth = 0;\n  let inStr = false;\n  let strCh = '';\n  let inTemplate = false;\n  for (; i < source.length; i++) {\n    const ch = source[i];\n    const prev = source[i - 1];\n    if (inStr) {\n      if (ch === strCh && prev !== '\\\\') inStr = false;\n      continue;\n    }\n    if (inTemplate) {\n      if (ch === '`' && prev !== '\\\\') inTemplate = false;\n      continue;\n    }\n    if (ch === '\"' || ch === \"'\") { inStr = true; strCh = ch; continue; }\n    if (ch === '`') { inTemplate = true; continue; }\n    if (ch === '{') depth++;\n    if (ch === '}') {\n      depth--;\n      if (depth === 0) {\n        // Include closing brace\n        const snippet = source.slice(startIdx, i + 1);\n        return snippet;\n      }\n    }\n  }\n  return null;\n}\n",
+    "created_at": "2025-08-10T05:37:12Z",
+    "updated_at": "2025-08-10T05:37:12Z"
+}

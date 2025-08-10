@@ -1,0 +1,17 @@
+{
+    "pattern_name": "lazy_sentence_transformer_loader",
+    "description": "Lazily load SentenceTransformer once, select device, suppress noisy logs, and reuse global instance.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "_get_st_model"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def _get_st_model():\n        \"\"\"Lazily loads the SentenceTransformer model on first use.\"\"\"\n        global _ST_MODEL_INSTANCE\n        if _ST_MODEL_INSTANCE is None:\n            logger.info(f\"[Lazy Load] Loading sentence-transformer model 'all-MiniLM-L6-v2' onto device '{DEVICE}'...\")\n            _ST_MODEL_INSTANCE = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)\n            # Suppress the noisy INFO log from SentenceTransformer after loading\n            st_logger = logging.getLogger(\"sentence_transformers.SentenceTransformer\")\n            st_logger.setLevel(logging.WARNING)\n            logger.info(\"[Lazy Load] Model loaded successfully.\")\n        return _ST_MODEL_INSTANCE",
+    "created_at": "2025-08-10T05:44:02Z",
+    "updated_at": "2025-08-10T05:44:02Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_get_st_model",
+    "added_at_utc": "2025-08-10T05:44:02Z"
+}

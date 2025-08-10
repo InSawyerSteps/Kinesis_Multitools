@@ -1,0 +1,17 @@
+{
+    "pattern_name": "ensure_animation_restart_on_rerender",
+    "description": "Restart-safe animation bootstrap after DOM re-render; always stop then start next frame to avoid stale refs and zero-size rects.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "ensure_animation_restart_on_rerender"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function ensure_animation_restart_on_rerender(getCanvas, start, stop) {\n  const canvas = getCanvas();\n  if (!canvas) { stop(); return; }\n  stop();\n  requestAnimationFrame(() => start(canvas));\n}",
+    "created_at": "2025-08-10T05:29:46Z",
+    "updated_at": "2025-08-10T05:29:46Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "ensure_animation_restart_on_rerender",
+    "added_at_utc": "2025-08-10T05:29:46Z"
+}

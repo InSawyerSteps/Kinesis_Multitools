@@ -1,0 +1,17 @@
+{
+    "pattern_name": "sector_grouping_by_link_relationships",
+    "description": "Group planets by explicit sector links: choose the first link whose targetId startsWith('sectors:'); otherwise place in 'sectors:unassigned'. Returns Map<sectorId, Planet[]> for UI rendering.",
+    "language": "javascript",
+    "file_path": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "locator": {
+        "type": "function_name",
+        "function_name": "sector_grouping_by_link_relationships"
+    },
+    "extraction_strategy": "js_regex",
+    "source_code": "export function sector_grouping_by_link_relationships(planets) {\n  const sectors = new Map();\n  for (const p of planets) {\n    const link = (p.links || []).find(l => (l.targetId || '').startsWith('sectors:'));\n    const sectorId = link ? link.targetId : 'sectors:unassigned';\n    if (!sectors.has(sectorId)) sectors.set(sectorId, []);\n    sectors.get(sectorId).push(p);\n  }\n  return sectors;\n}",
+    "created_at": "2025-08-10T05:29:58Z",
+    "updated_at": "2025-08-10T05:29:58Z",
+    "source_file": "c:\\Projects\\BeyondEcho\\patterns\\galaxy_patterns.js",
+    "function_name": "sector_grouping_by_link_relationships",
+    "added_at_utc": "2025-08-10T05:29:58Z"
+}

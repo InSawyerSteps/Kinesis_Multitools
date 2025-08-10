@@ -13,6 +13,7 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
   - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range. Supports extracting the full source of a named function or class (using AST), or any arbitrary line range. Returns a structured status, snippet content, and message. See below for usage details.
   - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files. Supports modes for config file reading, structural outline, file statistics, and deep inspection of a function or class. Returns structured results for each mode. See below for usage details.
   - File read/list utilities: Safe listing and reading of project files.
+  - `anchor_drop`: Persistently register external project roots for secure, cross-session access.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
 - **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
@@ -91,6 +92,9 @@ The server will start on `http://localhost:8000`.
 - `index_project_files`: Incremental semantic indexing for search.
 - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification).
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
+- `get_snippet`: Extract by function/class/lines.
+- `introspect`: Config/outline/stats/inspect.
+- `anchor_drop`: Persist project roots across restarts.
 - File read/list utilities.
 
 **Removed tools:**
@@ -211,40 +215,78 @@ We welcome suggestions and contributions for new tools! If you have an idea for 
 
 ## Code Cookbook Multitool
 
-The `cookbook_multitool` is a unified endpoint for capturing and searching canonical code patterns ("golden patterns") in your project. It replaces the older `add_to_cookbook` and `find_in_cookbook` tools.
+The `cookbook_multitool` is a unified endpoint for capturing and searching canonical code patterns ("golden patterns") across multiple languages. It replaces the older `add_to_cookbook` and `find_in_cookbook` tools.
 
 ### Purpose
-- **Add** a function's source and metadata to the project cookbook for future reuse and consistency.
-- **Find** patterns by name, description, or function name for rapid code reuse and enforcement of best practices.
+- **Add** a pattern's source and metadata to the project cookbook (supports Python, JavaScript/TypeScript, HTML, JSON, and plain text).
+- **Find** patterns by name, description, or function name, optionally filtering by language.
 
-### Usage
+### Multi-language add options
+Use `/cookbook_multitool` with `mode: "add"`. You can add patterns via one of the following strategies:
 
-Send a request to `/cookbook_multitool` with the desired `mode`:
-
-#### Add a Pattern
+- File + function/class name (language auto-detected by extension, with override):
 ```json
 {
   "mode": "add",
-  "pattern_name": "My Golden Pattern",
+  "pattern_name": "secure_path_validator",
   "file_path": "C:/Projects/MCP Server/src/toolz.py",
   "function_name": "_is_safe_path",
-  "description": "A canonical function for secure path validation."
+  "description": "Ensures a given path stays within allowed project roots.",
+  "language": "python"
 }
 ```
 
-#### Find a Pattern
+- JavaScript/TypeScript function extraction (regex + brace balancing):
+```json
+{
+  "mode": "add",
+  "pattern_name": "fetch_with_retry",
+  "file_path": "C:/Projects/app/src/utils.ts",
+  "function_name": "fetchWithRetry",
+  "description": "Wrapper around fetch with exponential backoff.",
+  "language": "typescript"
+}
+```
+
+- HTML: extract from <script> blocks or between markers:
+```json
+{
+  "mode": "add",
+  "pattern_name": "form_validate_handler",
+  "file_path": "C:/Projects/site/index.html",
+  "start_marker": "<!-- VALIDATE_START -->",
+  "end_marker": "<!-- VALIDATE_END -->",
+  "description": "Client-side validation handler embedded in script block.",
+  "language": "html"
+}
+```
+
+- JSON/Text: store a snippet directly or via line markers:
+```json
+{
+  "mode": "add",
+  "pattern_name": "pytest_config",
+  "code_snippet": "{\n  \"pytest\": { \"addopts\": \"-q\" }\n}",
+  "description": "Minimal pytest JSON config snippet.",
+  "language": "json"
+}
+```
+
+### Find with optional language filter
 ```json
 {
   "mode": "find",
-  "query": "secure path"
+  "query": "secure path",
+  "language": "python"
 }
 ```
 
 ### Response
 - On success, returns a status and message (for add), or a list of matching patterns (for find).
-- All cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
+- Stored metadata includes `language`, `extraction_strategy`, and a `locator` describing how the snippet was extracted (e.g., function name, markers, or direct snippet).
+- Cookbook patterns are stored as JSON files in `.project_cookbook/` in the project root.
 
-See the developer guide for advanced usage and schema details.
+See `tooldevguide.md` for full schema, edge cases, and additional examples.
 
 ---
 

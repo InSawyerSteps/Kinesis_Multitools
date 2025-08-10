@@ -68,7 +68,7 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, List, Literal
 import uvicorn
 
 from fastmcp import FastMCP
@@ -77,6 +77,7 @@ from pydantic import BaseModel, Field
 # --- Add this block with the other imports ---
 import subprocess
 import difflib
+import base64
 
 try:
     print("\n=== DEBUG: Attempting to import radon ===")
@@ -236,15 +237,71 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 # Assumes this file is in 'src/' and the project root is its parent's parent.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROJECT_ROOTS: Dict[str, pathlib.Path] = {
-    "MCP-Server": PROJECT_ROOT,
-}
+PROJECT_ROOTS_CONFIG_FILE = PROJECT_ROOT / ".project_roots.json"
 INDEX_DIR_NAME = ".windsurf_search_index"
+
+def _load_project_roots() -> Dict[str, pathlib.Path]:
+    """Load project roots from persistent storage, with fallback to defaults."""
+    default_roots = {
+        "MCP-Server": PROJECT_ROOT,
+    }
+    
+    if not PROJECT_ROOTS_CONFIG_FILE.exists():
+        # Don't log on first startup to avoid noise
+        pass
+        return default_roots
+    
+    try:
+        with open(PROJECT_ROOTS_CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        
+        # Convert string paths back to pathlib.Path objects and validate
+        loaded_roots = {}
+        for name, path_str in config.items():
+            try:
+                path_obj = pathlib.Path(path_str).resolve()
+                if path_obj.exists() and path_obj.is_dir():
+                    loaded_roots[name] = path_obj
+                    logger.info(f"[project_roots] Loaded: {name} -> {path_obj}")
+                else:
+                    logger.warning(f"[project_roots] Skipping invalid path for '{name}': {path_str}")
+            except Exception as e:
+                logger.warning(f"[project_roots] Error loading path for '{name}': {e}")
+        
+        # Always include default MCP-Server root
+        loaded_roots["MCP-Server"] = PROJECT_ROOT
+        return loaded_roots
+        
+    except Exception as e:
+        logger.error(f"[project_roots] Failed to load config file, using defaults: {e}")
+        return default_roots
+
+def _save_project_roots(roots: Dict[str, pathlib.Path]) -> bool:
+    """Save project roots to persistent storage."""
+    try:
+        # Convert pathlib.Path objects to strings for JSON serialization
+        config = {name: str(path) for name, path in roots.items()}
+        
+        # Create parent directory if it doesn't exist
+        PROJECT_ROOTS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write with pretty formatting
+        with open(PROJECT_ROOTS_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, sort_keys=True)
+        
+        logger.info(f"[project_roots] Saved {len(config)} project roots to {PROJECT_ROOTS_CONFIG_FILE}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[project_roots] Failed to save config file: {e}")
+        return False
+
+# Load project roots at module initialization
+PROJECT_ROOTS: Dict[str, pathlib.Path] = _load_project_roots()
 
 # ---------------------------------------------------------------------------
 # Core Helper Functions
 # ---------------------------------------------------------------------------
-
 
 import concurrent.futures
 import functools
@@ -392,7 +449,8 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 @mcp.tool()
 def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
     """
-    Dynamically register a project root at runtime, enabling all project-based tools to operate on the specified folder.
+    Dynamically register a project root at runtime with persistent storage, enabling all project-based tools to operate on the specified folder.
+    The registration persists across MCP server restarts.
 
     Args:
         path (str): Absolute path to the folder to register as a project root.
@@ -404,18 +462,37 @@ def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
     Usage:
         - Call this tool with the desired path (and optional alias) to register a new project root.
         - All project-based tools (index, search, read, list) will immediately recognize the new root.
+        - The registration is saved to .project_roots.json and persists across server restarts.
     """
     logger.info(f"[anchor_drop] Registering project root: path={path}, project_name={project_name}")
     try:
         base_path = pathlib.Path(path).resolve()
         if not base_path.exists() or not base_path.is_dir():
             return {"status": "error", "message": f"Path does not exist or is not a directory: {path}"}
+        
         alias = project_name if project_name else base_path.name
+        
+        # Check if already registered
+        if alias in PROJECT_ROOTS and PROJECT_ROOTS[alias] == base_path:
+            return {
+                "status": "success", 
+                "message": f"Project root '{alias}' is already registered at '{base_path}'.",
+                "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
+            }
+        
+        # Add to in-memory registry
         PROJECT_ROOTS[alias] = base_path
-        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}")
+        
+        # Persist to disk
+        if _save_project_roots(PROJECT_ROOTS):
+            persistence_msg = " (persisted to disk)"
+        else:
+            persistence_msg = " (WARNING: failed to persist to disk)"
+        
+        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}{persistence_msg}")
         return {
             "status": "success",
-            "message": f"Registered project root '{alias}' at '{base_path}'.",
+            "message": f"Registered project root '{alias}' at '{base_path}'{persistence_msg}.",
             "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
         }
     except Exception as e:
@@ -471,42 +548,166 @@ def list_project_files(project_name: str, extensions: Optional[List[str]] = None
 
 @mcp.tool()
 @tool_timeout_and_errors(timeout=60)
-def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
+def read_project_file(
+    absolute_file_path: str,
+    max_bytes: int = 2_000_000,
+    offset: int = 0,
+    length: Optional[int] = None,
+    binary_mode: Literal["auto", "text", "hex", "base64"] = "auto",
+    encoding: str = "utf-8",
+) -> Dict[str, Any]:
     """
     Read a file from disk with path safety checks.
 
     Args:
         absolute_file_path (str): Full absolute path to the file (must be within the project root).
-        max_bytes (int, optional): Maximum number of bytes to read (default: 2,000,000).
+        max_bytes (int, optional): Safety cap for maximum number of bytes to read in a single call (default: 2,000,000).
+        offset (int, optional): Byte offset to start reading from (default: 0). Must be >= 0.
+        length (int, optional): Maximum number of bytes to read starting at offset. When omitted, reads up to max_bytes.
+        binary_mode (str, optional): How to return content bytes. One of:
+            - 'auto' (default): Try text decode using 'encoding'; on failure, return short hex preview.
+            - 'text': Force text decode using 'encoding'. On failure, returns error.
+            - 'hex': Return hex string of the bytes (may be preview-limited).
+            - 'base64': Return base64-encoded string of the bytes.
+        encoding (str, optional): Text encoding to use when decoding in 'auto' or 'text' modes. Default 'utf-8'.
 
     Returns:
         dict: {
             'status': 'success'|'error',
             'file_path': str,
-            'content': str or None,  # UTF-8 text or hex preview for binary
-            'message': str
+            'content': str or None,  # UTF-8 text, hex string, or base64 depending on mode
+            'message': str,
+            'total_size': int,
+            'offset': int,
+            'bytes_read': int,
+            'eof': bool,
+            'binary_mode_used': str,
+            'encoding': str
         }
 
     Usage:
-        Use this tool to safely read the contents of a file for display, editing, or analysis. Binary files return a hex preview. Files outside project roots are blocked.
+        Use this tool to safely read the contents of a file for display, editing, or analysis. Binary files can be returned
+        as hex or base64, and large files can be paginated using 'offset' and 'length'. Files outside project roots are blocked.
     """
     path = pathlib.Path(absolute_file_path)
     if not _is_safe_path(path):
-        return {"status": "error", "file_path": absolute_file_path, "content": None, "message": "Access denied: Path is outside configured project roots."}
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": "Access denied: Path is outside configured project roots.",
+        }
     if not path.is_file():
-        return {"status": "error", "file_path": absolute_file_path, "content": None, "message": "Not a file."}
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": "Not a file.",
+        }
+    if offset < 0:
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": "Invalid offset: must be >= 0.",
+        }
+    if length is not None and length < 0:
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": "Invalid length: must be >= 0 when provided.",
+        }
+    if binary_mode not in ("auto", "text", "hex", "base64"):
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": "Invalid binary_mode. Use one of: auto, text, hex, base64.",
+        }
     try:
-        data = path.read_bytes()[:max_bytes]
-        try:
-            content = data.decode("utf-8")
-            message = f"Successfully read {len(data)} bytes as text."
-        except UnicodeDecodeError:
-            content = data.hex()[:1000]  # Return a hex preview for binary files
-            message = f"Read {len(data)} bytes of binary data (showing hex preview)."
-        return {"status": "success", "file_path": absolute_file_path, "content": content, "message": message}
+        total_size = path.stat().st_size
+        if offset >= total_size:
+            # Nothing to read; we're at or beyond EOF
+            return {
+                "status": "success",
+                "file_path": absolute_file_path,
+                "content": "",
+                "message": "Offset beyond EOF; returning empty content.",
+                "total_size": total_size,
+                "offset": offset,
+                "bytes_read": 0,
+                "eof": True,
+                "binary_mode_used": binary_mode,
+                "encoding": encoding,
+            }
+
+        # Determine how many bytes to read this call (respect both 'length' and 'max_bytes')
+        max_window = max_bytes if length is None else min(length, max_bytes)
+        end = min(total_size, offset + max_window)
+        read_len = max(0, end - offset)
+
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read(read_len)
+
+        eof = (end >= total_size)
+
+        # Encode content depending on requested binary_mode
+        content: Optional[str] = None
+        message: str
+        used_mode = binary_mode
+
+        if binary_mode == "text":
+            # Strict text decode; error on failure
+            content = data.decode(encoding)
+            message = f"Read {len(data)} bytes as text from offset {offset}."
+        elif binary_mode == "hex":
+            # Keep preview to avoid huge payloads in hex mode
+            content = data.hex()
+            if len(content) > 2000:
+                content = content[:2000]
+                message = f"Read {len(data)} bytes (hex preview truncated)."
+            else:
+                message = f"Read {len(data)} bytes (hex)."
+        elif binary_mode == "base64":
+            content = base64.b64encode(data).decode("ascii")
+            message = f"Read {len(data)} bytes (base64)."
+        else:  # auto
+            try:
+                content = data.decode(encoding)
+                message = f"Read {len(data)} bytes as text from offset {offset}."
+            except UnicodeDecodeError:
+                used_mode = "hex"
+                hex_preview = data.hex()
+                # Keep same preview size behavior as legacy: 1000 chars
+                if len(hex_preview) > 1000:
+                    hex_preview = hex_preview[:1000]
+                    message = f"Read {len(data)} bytes of binary data (showing hex preview)."
+                else:
+                    message = f"Read {len(data)} bytes of binary data (hex)."
+                content = hex_preview
+
+        return {
+            "status": "success",
+            "file_path": absolute_file_path,
+            "content": content,
+            "message": message,
+            "total_size": total_size,
+            "offset": offset,
+            "bytes_read": len(data),
+            "eof": eof,
+            "binary_mode_used": used_mode,
+            "encoding": encoding,
+        }
     except Exception as e:
         logger.error("Failed to read file '%s': %s", absolute_file_path, e, exc_info=True)
-        return {"status": "error", "file_path": absolute_file_path, "content": None, "message": str(e)}
+        return {
+            "status": "error",
+            "file_path": absolute_file_path,
+            "content": None,
+            "message": str(e),
+        }
 
 # ---------------------------------------------------------------------------
 # Tool 1: Indexing (Prerequisite for semantic searches)

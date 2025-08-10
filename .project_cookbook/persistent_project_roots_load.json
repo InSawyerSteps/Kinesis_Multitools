@@ -1,0 +1,17 @@
+{
+    "pattern_name": "persistent_project_roots_load",
+    "description": "Load project roots from persistent JSON with defaults, validation, and automatic inclusion of MCP-Server root.",
+    "language": "python",
+    "file_path": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "locator": {
+        "type": "function_name",
+        "function_name": "_load_project_roots"
+    },
+    "extraction_strategy": "python_ast",
+    "source_code": "def _load_project_roots() -> Dict[str, pathlib.Path]:\n    \"\"\"Load project roots from persistent storage, with fallback to defaults.\"\"\"\n    default_roots = {\n        \"MCP-Server\": PROJECT_ROOT,\n    }\n    \n    if not PROJECT_ROOTS_CONFIG_FILE.exists():\n        # Don't log on first startup to avoid noise\n        pass\n        return default_roots\n    \n    try:\n        with open(PROJECT_ROOTS_CONFIG_FILE, \"r\", encoding=\"utf-8\") as f:\n            config = json.load(f)\n        \n        # Convert string paths back to pathlib.Path objects and validate\n        loaded_roots = {}\n        for name, path_str in config.items():\n            try:\n                path_obj = pathlib.Path(path_str).resolve()\n                if path_obj.exists() and path_obj.is_dir():\n                    loaded_roots[name] = path_obj\n                    logger.info(f\"[project_roots] Loaded: {name} -> {path_obj}\")\n                else:\n                    logger.warning(f\"[project_roots] Skipping invalid path for '{name}': {path_str}\")\n            except Exception as e:\n                logger.warning(f\"[project_roots] Error loading path for '{name}': {e}\")\n        \n        # Always include default MCP-Server root\n        loaded_roots[\"MCP-Server\"] = PROJECT_ROOT\n        return loaded_roots\n        \n    except Exception as e:\n        logger.error(f\"[project_roots] Failed to load config file, using defaults: {e}\")\n        return default_roots",
+    "created_at": "2025-08-10T05:36:40Z",
+    "updated_at": "2025-08-10T05:36:40Z",
+    "source_file": "c:\\Projects\\MCP Server\\src\\toolz.py",
+    "function_name": "_load_project_roots",
+    "added_at_utc": "2025-08-10T05:36:40Z"
+}
