@@ -13,7 +13,7 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
   - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range. Supports extracting the full source of a named function or class (using AST), or any arbitrary line range. Returns a structured status, snippet content, and message. See below for usage details.
   - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files. Supports modes for config file reading, structural outline, file statistics, and deep inspection of a function or class. Returns structured results for each mode. See below for usage details.
   - File read/list utilities: Safe listing and reading of project files.
-  - `anchor_drop`: Persistently register external project roots for secure, cross-session access.
+  - `anchor_multitool`: Project root management (modes: drop, list, remove, rename). Persist external project roots across restarts.
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
 - **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
@@ -79,13 +79,17 @@ Configure the MCP server in your `mcp_config.json`:
 
 ## Usage
 
-To run the server:
+Run the MCP server via FastMCP (stdio transport):
 
 ```bash
-python src/toolz.py
+fastmcp run src/toolz.py --transport stdio
 ```
 
-The server will start on `http://localhost:8000`.
+Notes:
+
+- The server is designed to be launched by an MCP client (e.g., Windsurf) over stdio.
+- Direct `python src/toolz.py` is not the supported entrypoint for serving tools.
+- HTTP mode is not provided by default. If you need HTTP, wrap the FastMCP server yourself.
 
 ## Supported Tools
 
@@ -94,7 +98,7 @@ The server will start on `http://localhost:8000`.
 - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns.
 - `get_snippet`: Extract by function/class/lines.
 - `introspect`: Config/outline/stats/inspect.
-- `anchor_drop`: Persist project roots across restarts.
+- `anchor_multitool`: Manage project roots (drop/list/remove/rename) and persist across restarts.
 - File read/list utilities.
 
 **Removed tools:**
@@ -123,27 +127,16 @@ If you implement a new utility or multitool that solves a general problem (e.g.,
 
 ### Indexing the Project
 
-Several of the `/search` subtools rely on a FAISS vector index generated from
-your source files.  This index is stored in a hidden folder inside the project root.  If the index does not exist,
-embedding‑based modes such as `semantic`, `similarity` and `task_verification`
-return an error:
+Embedding‑based search modes (`semantic`, `similarity`, `task_verification`) require a FAISS vector index. The index is stored in a hidden folder under the project root. If the index is missing, these modes will return an error asking you to run `index_project_files` first.
 
-```
-Index not found for project. Please run 'index_project_files' first.
-```
+Indexing is incremental: unchanged files reuse existing vectors; only added/modified files are re‑embedded.
 
-Run the indexing tool whenever you update your code so that these subtools have
-up‑to‑date embeddings.  Indexing is incremental and will only reprocess files
-that changed.
+Invoke the tool from your MCP client:
 
-Start by indexing your project:
-
-```http
-POST http://localhost:8000/index_project_files
-Content-Type: application/json
-
+```json
 {
-  "project_name": "MCP-Server"
+  "tool": "index_project_files",
+  "args": { "project_name": "MCP-Server" }
 }
 ```
 
@@ -164,39 +157,47 @@ Example response:
 
 ### Searching the Codebase
 
-Send a request to `/search` with the desired `search_type` and query.
+Call the `search` tool with the desired `search_type` and parameters.
 
-Example – semantic search:
+Semantic search example:
 
-```http
-POST http://localhost:8000/search
-Content-Type: application/json
-
+```json
 {
-  "search_type": "semantic",
-  "query": "how does the server handle user authentication?",
-  "project_name": "MCP-Server",
-  "params": {
-    "max_results": 5
+  "tool": "search",
+  "args": {
+    "search_type": "semantic",
+    "query": "how does the server manage timeouts on Windows?",
+    "project_name": "MCP-Server",
+    "params": { "max_results": 5 }
   }
 }
 ```
 
-Example – AST search for a function definition:
+AST search for a function definition:
 
-```http
-POST http://localhost:8000/search
-Content-Type: application/json
-
+```json
 {
-  "search_type": "ast",
-  "query": "unified_search",
-  "project_name": "MCP-Server",
-  "params": {
-    "target_node_type": "function"
+  "tool": "search",
+  "args": {
+    "search_type": "ast",
+    "query": "unified_search",
+    "project_name": "MCP-Server",
+    "params": { "target_node_type": "function" }
   }
 }
 ```
+
+Other supported `search_type` values: `keyword`, `regex`, `references`, `similarity`, `task_verification`.
+
+Tip: narrow scope with `params.includes` (glob patterns) and set `params.max_results` to limit output.
+
+---
+
+## Windows Reliability Notes
+
+- Tools are decorated for strict timeouts. On Windows, thread‑based timeouts are used where process isolation is unsafe for certain workloads; on POSIX, process‑based timeouts are used.
+- Decorator order matters for Windows: `@mcp.tool(...)` must be the outermost decorator. This repository follows that rule across all tools.
+- Enable verbose search diagnostics by setting `MCP_DEBUG_SEARCH=1` in the environment before launching the server.
 
 ## Roadmap
 

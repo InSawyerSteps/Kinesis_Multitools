@@ -2,13 +2,26 @@
 
 > **Supported MCP Tools (as of July 2025):**
 >
-> - `index_project_files`: Incremental semantic indexing of project files for search (see `.windsurf/rules/indexing.md`).
-> - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification; see `.windsurf/rules/search.md`).
+> - `index_project_files`: Incremental semantic indexing of project files for search.
+> - `search`: Multi-modal codebase search (keyword, regex, semantic, ast, references, similarity, task_verification).
 > - `cookbook_multitool`: Unified tool for capturing and searching canonical code patterns (see below).
 > - `get_snippet`: Extract a precise code snippet from a file by function, class, or line range (see below).
 > - `introspect`: Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files (see below).
 > - File read/list utilities: Safe recursive listing and reading of project files.
 > - `anchor_drop`: Persistently register external project roots for safe tool access across restarts.
+
+---
+
+## Runtime and Transport
+
+- The server is designed to run under FastMCP using the stdio transport.
+- Typical launch:
+
+```bash
+fastmcp run src/toolz.py --transport stdio
+```
+
+- HTTP endpoints are not provided by default. If you require HTTP, build a thin wrapper that initializes and serves the FastMCP instance.
 
 ---
 
@@ -108,14 +121,18 @@ All file operations are sandboxed to registered project roots to ensure security
 - The MCP-Server root is always included by default.
 - Roots are loaded on startup and validated (existence, normalization).
 
-### Registering roots with `anchor_drop`
-Use the `anchor_drop` tool to add an external project root (optionally with an alias) and persist it across restarts.
+### Registering roots with `anchor_multitool`
+Use the `anchor_multitool` (mode: `drop`) to add an external project root (optionally with an alias) and persist it across restarts.
 
 Example request:
 ```json
 {
-  "path": "C:/Projects/AnotherRepo",
-  "project_name": "AnotherRepo"
+  "tool": "anchor_multitool",
+  "args": {
+    "mode": "drop",
+    "path": "C:/Projects/AnotherRepo",
+    "project_name": "AnotherRepo"
+  }
 }
 ```
 
@@ -130,7 +147,7 @@ Example response includes `status`, `message`, and the updated `project_roots` m
 - Avoid duplicate registrations; the tool handles de-duplication and returns an informative message.
 
 ### Manual Testing Checklist (Quick)
-- __anchor_drop__: Register an external root and confirm persistence in `.project_roots.json`.
+- __anchor_multitool__: Register an external root (mode `drop`) and confirm persistence in `.project_roots.json`.
   - Expect `status: success`, updated `project_roots` mapping.
 - __index_project_files__: Run once, then modify 1-2 files and re-run.
   - Expect `updated_files` > 0 only on the second run; `unchanged_files` dominates.
@@ -306,16 +323,22 @@ The tool returns a summary dict:
 
 ## 5. Reliability and Performance Patterns
 
-### Known Issues
-- The `analyze` tool may hang, time out, or fail to return results. This is a known issue and is under investigation. All other tools are stable and reliable.
+### Known Notes
+- The `analyze` section below is illustrative for design patterns and may not be currently exposed as a production tool in this repository. All documented patterns remain applicable to future multitools.
 
 To ensure the MCP server is robust and responsive, especially when dealing with long-running tasks or heavy libraries, follow these critical patterns.
 
-### 5.1. Process-Based Timeouts for Reliability
+### 5.1. Timeout Strategy and Decorator Order
 
 Standard threading timeouts in Python cannot interrupt blocking I/O or long-running native code (e.g., in libraries like `torch` or `pylint`). This can cause tools to hang indefinitely, freezing the server.
 
-**Solution:** Use the `@tool_process_timeout_and_errors` decorator.
+General rules:
+
+- Decorator order matters on Windows spawn mode. Ensure `@mcp.tool(...)` is the outermost decorator.
+- Prefer process-based isolation for heavy/unsafe workloads on POSIX systems.
+- Use thread-based timeouts where process isolation is impractical on Windows.
+
+**Solution (POSIX):** Use the `@tool_process_timeout_and_errors` decorator.
 
 This decorator runs the entire tool function in a separate `multiprocessing.Process`.
 - It enforces a hard timeout, forcibly terminating the process if it exceeds the limit.
@@ -333,7 +356,7 @@ def my_long_running_tool(request: MyRequest) -> dict:
     return {"status": "success"}
 ```
 
-**Rule:** All tools that perform heavy computation, run external subprocesses, or use libraries with native C/C++ extensions **must** use this decorator.
+**Rule:** Tools that perform heavy computation, run external subprocesses, or use C/C++ extensions should use process isolation on POSIX and thread-based timeouts on Windows. Always keep `@mcp.tool(...)` outermost.
 
 ### 5.2. Lazy Loading for Performance
 
@@ -370,6 +393,13 @@ def _embed_batch(batch_texts: list[str]) -> list[list[float]]:
 
 ---
 
+### 5.3. Debug Instrumentation for Search
+
+- Enable verbose diagnostics by setting the environment variable `MCP_DEBUG_SEARCH=1` before launching the server.
+- Debug logs include search routing decisions, include-glob normalization, and file iteration. Use this to investigate performance or freezing symptoms.
+
+---
+
 ## 6. Logging, Error Handling, and Security
 
 - Use the shared `logger` instance (`logger.info`, `logger.error`, etc.)
@@ -383,7 +413,9 @@ def _embed_batch(batch_texts: list[str]) -> list[list[float]]:
 
 ## 7. Static Analysis Multitool: `/analyze`
 
-**Purpose:** Run multiple static analyses (quality, types, security, dead_code, complexity, todos, dependencies, licenses) on files or directories.
+Note: This section is a design reference. The multitool may not be active in the current codebase.
+
+**Purpose (design):** Run multiple static analyses (quality, types, security, dead_code, complexity, todos, dependencies, licenses) on files or directories.
 
 **Model:**
 ```python
