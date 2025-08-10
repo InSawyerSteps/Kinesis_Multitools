@@ -37,7 +37,9 @@ rag_recruiting_mvp/depe
 metadata.json
 index.faiss
 .windsurf_search_index
-.windsurf
+.windsurf/*
+!.windsurf/workflows/
+!.windsurf/workflows/handoff.md
 .windsurfrules
 edit_text.txt
 mcp_server.log
@@ -46,5 +48,4 @@ search.md
 cookbook.md
 fixall.md
 handoff.md
-.vscode
 tests

@@ -1,0 +1,12 @@
+{
+    "pattern_name": "temp_verification_pattern",
+    "description": "Temporary test pattern added by automated verification.",
+    "language": "python",
+    "locator": {
+        "type": "snippet"
+    },
+    "extraction_strategy": "snippet",
+    "source_code": "def hello():\n    return \"world\"\n",
+    "created_at": "2025-08-10T09:23:26Z",
+    "updated_at": "2025-08-10T09:23:26Z"
+}

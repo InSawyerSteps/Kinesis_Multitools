@@ -68,7 +68,7 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 import uvicorn
 
 from fastmcp import FastMCP
@@ -78,6 +78,7 @@ from pydantic import BaseModel, Field
 import subprocess
 import difflib
 import base64
+import platform
 
 try:
     print("\n=== DEBUG: Attempting to import radon ===")
@@ -184,6 +185,17 @@ class SnippetRequest(BaseModel):
     start_line: Optional[int] = Field(None, description="The starting line number (1-indexed).")
     end_line: Optional[int] = Field(None, description="The ending line number (inclusive).")
 
+class AnchorMultitoolRequest(BaseModel):
+    mode: str = Field(..., description="Operation mode: 'drop', 'list', 'remove', or 'rename'.")
+    # For 'drop' mode
+    path: Optional[str] = Field(None, description="Absolute path to the folder to register as a project root (required for 'drop').")
+    project_name: Optional[str] = Field(None, description="Alias for the project (optional for 'drop', defaults to folder name).")
+    # For 'remove' mode
+    # project_name is reused
+    # For 'rename' mode
+    old_name: Optional[str] = Field(None, description="Existing alias to rename (required for 'rename').")
+    new_name: Optional[str] = Field(None, description="New alias name (required for 'rename').")
+
 
 # --- Dependency Imports ---
 # These are required for the tools to function.
@@ -230,6 +242,15 @@ logger.info("[MCP SERVER IMPORT] Importing src/toolz.py and initializing FastMCP
 mcp = FastMCP(
     name="MCP-Server",
 )
+
+# Debug toggle for search instrumentation
+DEBUG_SEARCH = str(os.environ.get("MCP_DEBUG_SEARCH", "0")).lower() in ("1", "true", "yes", "y")
+IS_WINDOWS = platform.system() == "Windows"
+
+def _dlog(msg: str) -> None:
+    """Emit debug logs only when MCP_DEBUG_SEARCH is enabled."""
+    if DEBUG_SEARCH:
+        logger.info(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +324,57 @@ PROJECT_ROOTS: Dict[str, pathlib.Path] = _load_project_roots()
 # Core Helper Functions
 # ---------------------------------------------------------------------------
 
+def _normalize_search_includes(includes: List[str], project_path: pathlib.Path, extensions: Optional[List[str]] = None) -> List[pathlib.Path]:
+    """
+    Normalize search includes to handle directories, files, and glob patterns properly.
+    
+    Args:
+        includes: List of include patterns/paths
+        project_path: Base project path
+        extensions: Optional file extensions to filter by
+    
+    Returns:
+        List of file paths to search
+    """
+    start_ts = time.perf_counter()
+    _dlog(f"[_normalize_search_includes] start includes={includes} extensions={extensions}")
+    files = []
+    # Normalize extensions to plain (no leading dot) lowercase for consistent comparison
+    norm_exts = {e.lower().lstrip('.') for e in extensions} if extensions else None
+    for inc in includes:
+        # Handle absolute vs relative paths
+        inc_path = project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc)
+        _dlog(f"[_normalize_search_includes] processing include='{inc}' as path='{inc_path}'")
+        
+        if inc_path.is_dir():
+            # Directory: get all files within it
+            _dlog(f"[_normalize_search_includes] dir -> scanning {inc_path}")
+            files.extend(_iter_files(inc_path, extensions=extensions))
+        elif inc_path.is_file():
+            # File: add directly if it matches extension filter
+            if not norm_exts or inc_path.suffix.lstrip('.').lower() in norm_exts:
+                _dlog(f"[_normalize_search_includes] file accepted: {inc_path}")
+                files.append(inc_path)
+        else:
+            # Try as glob pattern
+            try:
+                _dlog(f"[_normalize_search_includes] glob expand: base={project_path} pattern='{inc}'")
+                glob_matches = list(project_path.glob(inc))
+                for match in glob_matches:
+                    if match.is_file():
+                        if not norm_exts or match.suffix.lstrip('.').lower() in norm_exts:
+                            files.append(match)
+                    elif match.is_dir():
+                        files.extend(_iter_files(match, extensions=extensions))
+            except (OSError, ValueError) as e:
+                # Invalid glob pattern, skip
+                logger.warning(f"[_normalize_search_includes] glob error for pattern='{inc}': {e}")
+                continue
+    
+    elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
+    _dlog(f"[_normalize_search_includes] end total_files={len(files)} elapsed_ms={elapsed_ms}")
+    return files
+
 import concurrent.futures
 import functools
 import traceback
@@ -311,34 +383,57 @@ import time
 
 def tool_process_timeout_and_errors(timeout=60):
     """
-    Decorator to run a function in a separate process with a hard timeout and robust error handling.
+    Decorator to run a function with a hard timeout and robust error handling.
+    Uses multiprocessing on POSIX. On Windows, falls back to a thread-based runner
+    to avoid spawn/pickling issues that can hang MCP tools.
     Returns MCP-protocol-compliant error dicts on timeout or exception.
     """
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            def target_fn(q, *a, **k):
+            import platform
+            if platform.system() == "Windows":
+                # Fallback to thread-based timeout (same behavior as tool_timeout_and_errors)
+                logger = logging.getLogger("mcp_search_tools")
                 try:
-                    result = func(*a, **k)
-                    q.put(("success", result))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(func, *args, **kwargs)
+                        try:
+                            return future.result(timeout=timeout)
+                        except concurrent.futures.TimeoutError:
+                            logger.error(f"[TIMEOUT] Tool '{func.__name__}' timed out after {timeout} seconds (thread fallback).")
+                            return {"status": "error", "message": f"Tool '{func.__name__}' timed out after {timeout} seconds."}
                 except Exception as e:
                     tb = traceback.format_exc()
-                    q.put(("error", {"status": "error", "message": str(e), "traceback": tb}))
-            q = multiprocessing.Queue()
-            p = multiprocessing.Process(target=target_fn, args=(q, *args), kwargs=kwargs)
-            p.start()
-            try:
-                status, result = q.get(timeout=timeout)
-                p.join(1)
-                if status == "success":
-                    return result
-                else:
-                    logging.error(f"[tool_process_timeout_and_errors] Tool error: {result.get('message')}")
-                    return result
-            except Exception as e:
-                p.terminate()
-                logging.error(f"[tool_process_timeout_and_errors] Tool timed out or crashed: {e}")
-                return {"status": "error", "message": f"Tool timed out after {timeout} seconds or crashed.", "exception": str(e)}
+                    logger.error(f"[EXCEPTION] Tool '{func.__name__}' failed (thread fallback): {e}\n{tb}")
+                    return {"status": "error", "message": f"Tool '{func.__name__}' failed: {e}", "traceback": tb}
+            else:
+                # Use separate process on POSIX
+                def target_fn(q, *a, **k):
+                    try:
+                        result = func(*a, **k)
+                        q.put(("success", result))
+                    except Exception:
+                        tb = traceback.format_exc()
+                        q.put(("error", {"status": "error", "message": "Subprocess error", "traceback": tb}))
+                q = multiprocessing.Queue()
+                p = multiprocessing.Process(target=target_fn, args=(q, *args), kwargs=kwargs)
+                p.start()
+                try:
+                    status, result = q.get(timeout=timeout)
+                    p.join(1)
+                    if status == "success":
+                        return result
+                    else:
+                        logging.error(f"[tool_process_timeout_and_errors] Tool error: {result.get('message')}")
+                        return result
+                except Exception as e:
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                    logging.error(f"[tool_process_timeout_and_errors] Tool timed out or crashed: {e}")
+                    return {"status": "error", "message": f"Tool timed out after {timeout} seconds or crashed.", "exception": str(e)}
         return wrapper
     return decorator
 
@@ -392,6 +487,7 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_
     files_yielded = 0
     max_files = 20000  # Hard safety cap
 
+    _dlog(f"[_iter_files] start root='{root}' extensions={extensions} max_return={max_return}")
     while dirs_to_scan and files_processed < max_files and files_yielded < max_return:
         current_dir = dirs_to_scan.popleft()
         try:
@@ -401,8 +497,10 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_
                 files_processed += 1
                 if files_processed >= max_files:
                     logger.warning(f"[_iter_files] Processed over {max_files} items. Stopping traversal as a safety measure.")
+                    _dlog(f"[_iter_files] safety-stop files_processed={files_processed} files_yielded={files_yielded}")
                     return
                 if files_yielded >= max_return:
+                    _dlog(f"[_iter_files] reached max_return files_yielded={files_yielded}")
                     return
                 if item.is_dir():
                     if item.name not in exclude_dirs:
@@ -420,6 +518,7 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_
         except (PermissionError, OSError) as e:
             logger.warning(f"Skipping directory {current_dir} due to access error: {e}")
             continue
+    _dlog(f"[_iter_files] end files_processed={files_processed} files_yielded={files_yielded}")
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Encodes a batch of texts into vector embeddings using the lazily-loaded model."""
@@ -445,59 +544,127 @@ def _is_safe_path(path: pathlib.Path) -> bool:
 # Project Root Registration Tool
 # ---------------------------------------------------------------------------
 
-@tool_timeout_and_errors(timeout=10)
 @mcp.tool()
-def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
+@tool_timeout_and_errors(timeout=10)
+def anchor_multitool(request: AnchorMultitoolRequest) -> dict:
     """
-    Dynamically register a project root at runtime with persistent storage, enabling all project-based tools to operate on the specified folder.
-    The registration persists across MCP server restarts.
-
+    Unified project root management multitool for dynamic project registration and management.
+    
     Args:
-        path (str): Absolute path to the folder to register as a project root.
-        project_name (str, optional): Alias for the project. Defaults to the folder name if not provided.
-
+        request (AnchorMultitoolRequest): Contains mode and mode-specific parameters.
+    
     Returns:
-        dict: Status, message, and current project roots.
-
-    Usage:
-        - Call this tool with the desired path (and optional alias) to register a new project root.
-        - All project-based tools (index, search, read, list) will immediately recognize the new root.
-        - The registration is saved to .project_roots.json and persists across server restarts.
+        dict: Status, message, and results based on the selected mode.
+    
+    Modes:
+        - 'drop': Register a new project root (path required, project_name optional)
+        - 'list': List all registered project roots
+        - 'remove': Remove a project root (project_name required)  
+        - 'rename': Rename a project root alias (old_name and new_name required)
     """
-    logger.info(f"[anchor_drop] Registering project root: path={path}, project_name={project_name}")
+    logger.info(f"[anchor_multitool] Mode: {request.mode}")
+    
     try:
-        base_path = pathlib.Path(path).resolve()
-        if not base_path.exists() or not base_path.is_dir():
-            return {"status": "error", "message": f"Path does not exist or is not a directory: {path}"}
-        
-        alias = project_name if project_name else base_path.name
-        
-        # Check if already registered
-        if alias in PROJECT_ROOTS and PROJECT_ROOTS[alias] == base_path:
-            return {
-                "status": "success", 
-                "message": f"Project root '{alias}' is already registered at '{base_path}'.",
-                "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
-            }
-        
-        # Add to in-memory registry
-        PROJECT_ROOTS[alias] = base_path
-        
-        # Persist to disk
-        if _save_project_roots(PROJECT_ROOTS):
-            persistence_msg = " (persisted to disk)"
+        if request.mode == 'drop':
+            return _anchor_drop_impl(request)
+        elif request.mode == 'list':
+            return _anchor_list_impl()
+        elif request.mode == 'remove':
+            return _anchor_remove_impl(request)
+        elif request.mode == 'rename':
+            return _anchor_rename_impl(request)
         else:
-            persistence_msg = " (WARNING: failed to persist to disk)"
-        
-        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}{persistence_msg}")
+            return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'drop', 'list', 'remove', or 'rename'."}
+    except Exception as e:
+        logger.error(f"[anchor_multitool] Failed: {e}", exc_info=True)
+        return {"status": "error", "message": f"Operation failed: {e}"}
+
+def _anchor_drop_impl(request: AnchorMultitoolRequest) -> dict:
+    """Implementation for drop mode."""
+    if not request.path:
+        return {"status": "error", "message": "Missing 'path' for 'drop' mode"}
+    
+    logger.info(f"[anchor_drop] Registering project root: path={request.path}, project_name={request.project_name}")
+    base_path = pathlib.Path(request.path).resolve()
+    if not base_path.exists() or not base_path.is_dir():
+        return {"status": "error", "message": f"Path does not exist or is not a directory: {request.path}"}
+    
+    alias = request.project_name if request.project_name else base_path.name
+    
+    # Check if already registered
+    if alias in PROJECT_ROOTS and PROJECT_ROOTS[alias] == base_path:
         return {
-            "status": "success",
-            "message": f"Registered project root '{alias}' at '{base_path}'{persistence_msg}.",
+            "status": "success", 
+            "message": f"Project root '{alias}' is already registered at '{base_path}'.",
             "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
         }
-    except Exception as e:
-        logger.error(f"[anchor_drop] Failed to register project root: {e}")
-        return {"status": "error", "message": f"Failed to register project root: {e}"}
+    
+    # Add to in-memory registry
+    PROJECT_ROOTS[alias] = base_path
+    
+    # Persist to disk
+    if _save_project_roots(PROJECT_ROOTS):
+        persistence_msg = " (persisted to disk)"
+    else:
+        persistence_msg = " (WARNING: failed to persist to disk)"
+    
+    logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}{persistence_msg}")
+    return {
+        "status": "success",
+        "message": f"Registered project root '{alias}' at '{base_path}'{persistence_msg}.",
+        "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
+    }
+
+def _anchor_list_impl() -> dict:
+    """Implementation for list mode."""
+    roots = {k: str(v) for k, v in PROJECT_ROOTS.items()}
+    logger.info("[anchor_list] Returning %d project roots.", len(roots))
+    return {"status": "success", "project_roots": roots, "count": len(roots)}
+
+def _anchor_remove_impl(request: AnchorMultitoolRequest) -> dict:
+    """Implementation for remove mode."""
+    if not request.project_name:
+        return {"status": "error", "message": "Missing 'project_name' for 'remove' mode"}
+    
+    logger.info("[anchor_remove] Removing project root alias='%s'", request.project_name)
+    if request.project_name not in PROJECT_ROOTS:
+        return {"status": "error", "message": f"Project alias '{request.project_name}' not found."}
+    if request.project_name == "MCP-Server":
+        return {"status": "error", "message": "Cannot remove the default 'MCP-Server' root."}
+
+    removed_path = PROJECT_ROOTS.pop(request.project_name)
+    persisted = _save_project_roots(PROJECT_ROOTS)
+    logger.info("[anchor_remove] Removed '%s' -> %s (persisted=%s)", request.project_name, removed_path, persisted)
+    return {
+        "status": "success",
+        "message": f"Removed project root '{request.project_name}'.",
+        "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()},
+    }
+
+def _anchor_rename_impl(request: AnchorMultitoolRequest) -> dict:
+    """Implementation for rename mode."""
+    if not request.old_name or not request.new_name:
+        return {"status": "error", "message": "Both 'old_name' and 'new_name' must be provided for 'rename' mode."}
+    
+    logger.info("[anchor_rename] Renaming alias '%s' -> '%s'", request.old_name, request.new_name)
+    if request.old_name not in PROJECT_ROOTS:
+        return {"status": "error", "message": f"Project alias '{request.old_name}' not found."}
+    if request.new_name in PROJECT_ROOTS:
+        return {"status": "error", "message": f"Project alias '{request.new_name}' already exists."}
+    if request.old_name == "MCP-Server":
+        return {"status": "error", "message": "Cannot rename the default 'MCP-Server' root."}
+
+    path = PROJECT_ROOTS.pop(request.old_name)
+    PROJECT_ROOTS[request.new_name] = path
+    persisted = _save_project_roots(PROJECT_ROOTS)
+    logger.info("[anchor_rename] Renamed '%s' -> '%s' at %s (persisted=%s)", request.old_name, request.new_name, path, persisted)
+    return {
+        "status": "success",
+        "message": f"Renamed project root '{request.old_name}' to '{request.new_name}'.",
+        "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()},
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # General-purpose Project Tools (migrated from toolz.py)
@@ -713,8 +880,8 @@ def read_project_file(
 # Tool 1: Indexing (Prerequisite for semantic searches)
 # ---------------------------------------------------------------------------
 
-@tool_process_timeout_and_errors(timeout=300)
 @mcp.tool(name="index_project_files")
+@tool_process_timeout_and_errors(timeout=300)
 def index_project_files(project_name: str, subfolder: Optional[str] = None, max_file_size_mb: int = 5) -> dict:
     """
     Index the project for semantic search **incrementally**.
@@ -945,6 +1112,7 @@ def _search_by_keyword(query: str, project_path: pathlib.Path, params: Dict) -> 
     """Performs a literal substring search across project files, honoring includes/extensions/max_results params."""
     import logging
     logger = logging.getLogger("mcp_search_tools")
+    t0 = time.perf_counter()
     results = []
     files_scanned = 0
 
@@ -952,11 +1120,16 @@ def _search_by_keyword(query: str, project_path: pathlib.Path, params: Dict) -> 
     extensions = params.get("extensions")
     max_results = params.get("max_results", 1000)
 
+    _dlog(f"[keyword] start q_len={len(query) if query else 0} includes={includes} extensions={extensions} max_results={max_results}")
+
     # Build file list
     if includes:
-        files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+        files = _normalize_search_includes(includes, project_path, extensions=extensions)
     else:
         files = list(_iter_files(project_path, extensions=extensions))
+
+    files = list(files)
+    _dlog(f"[keyword] files_to_scan={len(files)} sample={[str(files[0]) if files else None]}")
 
     for fp in files:
         logger.debug(f"[keyword] Scanning file: {fp}")
@@ -973,14 +1146,19 @@ def _search_by_keyword(query: str, project_path: pathlib.Path, params: Dict) -> 
                             "line_content": line_content.strip()[:200] + ("..." if len(line_content.strip()) > 200 else "")
                         })
                         if len(results) >= max_results:
+                            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                            _dlog(f"[keyword] early-return results={len(results)} files_scanned={files_scanned+1} took_ms={elapsed_ms}")
                             return {
                                 "status": "success",
                                 "results": results,
                                 "files_scanned": files_scanned + 1
                             }
             files_scanned += 1
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[keyword] skipping {fp} due to error: {e}")
             continue
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    _dlog(f"[keyword] end results={len(results)} files_scanned={files_scanned} took_ms={elapsed_ms}")
     return {
         "status": "success",
         "results": results,
@@ -1021,7 +1199,7 @@ def _search_by_regex(query: str, project_path: pathlib.Path, params: Dict) -> Di
 
     # Build file list
     if includes:
-        files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+        files = _normalize_search_includes(includes, project_path, extensions=extensions)
     else:
         files = list(_iter_files(project_path, extensions=extensions))
 
@@ -1055,65 +1233,6 @@ def _search_by_regex(query: str, project_path: pathlib.Path, params: Dict) -> Di
             continue
 
     return {"status": "success", "results": results, "files_scanned": files_scanned}
-
-def _search_by_semantic(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
-    """Performs semantic search using the FAISS index.
-
-    Supports params:
-        includes: optional list of file paths to restrict the returned results.
-        max_results: number of results to return (default 10).
-    """
-    if not LIBS_AVAILABLE:
-        return {"status": "error", "message": "Semantic search failed: Required libraries not installed."}
-
-    includes = params.get("includes")
-    max_results = params.get("max_results", 10)
-    subfolder = params.get("subfolder")
-
-    search_root = project_path
-    if subfolder:
-        search_root = project_path / subfolder
-
-    index_path = search_root / INDEX_DIR_NAME
-    faiss_index_file = index_path / "index.faiss"
-    metadata_file = index_path / "metadata.json"
-
-    if not (faiss_index_file.exists() and metadata_file.exists()):
-        return {"status": "error", "message": f"Index not found for project. Please run 'index_project_files' first."}
-
-    try:
-        index = faiss.read_index(str(faiss_index_file))
-        with open(metadata_file, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        
-        query_vec = _embed_batch([query])
-        distances, indices = index.search(np.array(query_vec, dtype=np.float32), max_results)
-        
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx == -1:
-                continue
-            meta = metadata[idx]
-            path_match = True
-            if includes:
-                # Check if the meta path is in the includes list.
-                # The path in metadata is relative to the project root, as is the 'includes' path.
-                # Normalize both for a reliable comparison.
-                meta_path_obj = pathlib.Path(meta["path"])
-                path_match = any(meta_path_obj == pathlib.Path(inc) for inc in includes)
-
-            if path_match:
-                results.append({
-                    "score": float(distances[0][i]),
-                    "path": meta["path"],
-                    "content": meta["content"]
-                })
-            
-            if len(results) >= max_results:
-                break
-        return {"status": "success", "results": results}
-    except Exception as e:
-        return {"status": "error", "message": f"An error occurred during semantic search: {e}"}
 
 def _search_by_ast(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Finds definitions of functions or classes using AST.
@@ -1171,7 +1290,7 @@ def _search_by_ast(query: str, project_path: pathlib.Path, params: Dict) -> Dict
 
     results = []
     if includes:
-        files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+        files = _normalize_search_includes(includes, project_path, extensions=["py"])
     else:
         files = _iter_files(project_path, extensions=[".py"])
 
@@ -1236,7 +1355,7 @@ def _search_for_references(query: str, project_path: pathlib.Path, params: Dict)
     elif query:
         grep_results = []
         if includes:
-            files = [project_path / inc if not os.path.isabs(inc) else pathlib.Path(inc) for inc in includes]
+            files = _normalize_search_includes(includes, project_path, extensions=["py"])
         else:
             files = _iter_files(project_path, extensions=[".py"])
 
@@ -1262,6 +1381,87 @@ def _search_for_references(query: str, project_path: pathlib.Path, params: Dict)
         if not grep_results:
             return {"status": "not_found", "message": "No references found."}
         return {"status": "success", "results": grep_results}
+
+def _search_by_semantic(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
+    """Semantic search over the prebuilt FAISS index.
+
+    Args:
+        query: Natural language or code text to search for semantically.
+        project_path: Absolute path to the project root.
+        params: Optional dict with keys:
+            - max_results (int): number of results to return (default 10)
+            - includes (List[str]): optional include filters; if provided, only results
+              whose absolute file path is in the normalized include set are returned.
+
+    Returns:
+        Dict with keys: status, results (list of {file_path, score, snippet}).
+    """
+    if not LIBS_AVAILABLE:
+        return {"status": "error", "message": "Semantic search requires faiss, numpy, and sentence-transformers. Please install dependencies or disable this mode."}
+
+    max_results = int(params.get("max_results", 10) or 10)
+    includes = params.get("includes")
+
+    index_dir = project_path / INDEX_DIR_NAME
+    index_file = index_dir / "index.faiss"
+    meta_file = index_dir / "metadata.json"
+    if not index_file.exists() or not meta_file.exists():
+        return {"status": "error", "message": "Semantic index not found. Run 'index_project_files' first."}
+
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to load metadata.json: {e}"}
+
+    if not metadata:
+        return {"status": "error", "message": "metadata.json is empty; run indexing again."}
+
+    try:
+        index = faiss.read_index(str(index_file))
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read FAISS index: {e}"}
+
+    # Build include set if provided (absolute paths)
+    include_set: Optional[set[str]] = None
+    if includes:
+        try:
+            inc_paths = _normalize_search_includes(includes, project_path)
+            include_set = {str(p.resolve()) for p in inc_paths}
+        except Exception:
+            include_set = None
+
+    # Embed the query and search
+    try:
+        vec = _embed_batch([query])[0]
+        q = np.array([vec], dtype=np.float32)
+        search_k = max_results * 3
+        search_k = min(search_k if search_k > 0 else 10, len(metadata))
+        D, I = index.search(q, search_k if search_k > 0 else 10)
+    except Exception as e:
+        return {"status": "error", "message": f"Semantic search failed during embedding or index search: {e}"}
+
+    results = []
+    for idx, dist in zip(I[0], D[0]):
+        if idx < 0 or idx >= len(metadata):
+            continue
+        m = metadata[idx]
+        abs_path = str((project_path / m.get("path", "")).resolve())
+        if include_set is not None and abs_path not in include_set:
+            continue
+        content = (m.get("content") or "").strip()
+        snippet = content[:200] + ("..." if len(content) > 200 else "")
+        results.append({
+            "file_path": abs_path,
+            "score": float(dist),  # L2 distance (lower is better)
+            "snippet": snippet,
+        })
+        if len(results) >= max_results:
+            break
+
+    if not results:
+        return {"status": "not_found", "message": "No semantic matches found."}
+    return {"status": "success", "results": results}
 
 def _search_for_similarity(query: str, project_path: pathlib.Path, params: Dict) -> Dict:
     """Finds code chunks semantically similar to the query block of code."""
@@ -1307,8 +1507,11 @@ def _verify_task_implementation(query: str, project_path: pathlib.Path, params: 
     }
 
 # --- The Single MCP Tool Endpoint for Searching ---
-@tool_process_timeout_and_errors(timeout=120)  # Increased timeout for potentially long searches
+# Windows: enforce thread-based timeout with shorter limit to surface hangs sooner.
+# POSIX: keep process-based isolation with a longer timeout.
+_SEARCH_DECORATOR = tool_timeout_and_errors(timeout=60) if IS_WINDOWS else tool_process_timeout_and_errors(timeout=120)
 @mcp.tool(name="search")
+@_SEARCH_DECORATOR
 def unified_search(request: SearchRequest) -> Dict[str, Any]:
     """
     Multi-modal codebase search tool. Supports keyword, regex, semantic, AST, references, similarity, and task_verification modes.
@@ -1344,9 +1547,12 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
         - 'similarity': Find similar code blocks. Query must be a code snippet. Supports includes, max_results.
         - 'task_verification': Check if a task is implemented. Query is a task description. Supports includes, max_results.
     """
+    t0 = time.perf_counter()
     search_type = request.search_type
     project_name = request.project_name
-    logger.info(f"[search] type='{search_type}' project='{project_name}' q='{request.query[:50]}...'")
+    q_preview = (request.query or "")[:80].replace("\n", " ")
+    logger.info(f"[search] type='{search_type}' project='{project_name}' q='{q_preview}...'")
+    _dlog(f"[search] params={request.params}")
 
     project_path = _get_project_path(project_name)
     if not project_path:
@@ -1366,7 +1572,32 @@ def unified_search(request: SearchRequest) -> Dict[str, Any]:
     search_func = search_functions.get(search_type)
 
     if search_func:
-        return search_func(request.query, project_path, request.params)
+        _dlog(f"[search] route -> {search_func.__name__}")
+        
+        def _run():
+            return search_func(request.query, project_path, request.params)
+
+        # Extra inner watchdog on Windows to guarantee return even if outer decorator fails
+        if IS_WINDOWS:
+            try:
+                import concurrent.futures as _fut
+                with _fut.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(_run)
+                    result = fut.result(timeout=55)
+            except _fut.TimeoutError:
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                logger.error(f"[search] inner-timeout type='{search_type}' after {elapsed_ms} ms")
+                return {"status": "error", "message": f"Search '{search_type}' timed out after 55s (inner watchdog)."}
+        else:
+            result = _run()
+
+        try:
+            res_count = len(result.get("results", [])) if isinstance(result, dict) else None
+        except Exception:
+            res_count = None
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        _dlog(f"[search] done type='{search_type}' took_ms={elapsed_ms} results={res_count}")
+        return result
     else:
         return {"status": "error", "message": "Invalid search type specified."}
 
@@ -1384,6 +1615,17 @@ OLLAMA_MODEL_FOR_TESTS = os.environ.get("OLLAMA_MODEL_FOR_TESTS", _OLLAMA_MAIN_M
 
 # === Code Cookbook Tools ===
 COOKBOOK_DIR_NAME = ".project_cookbook"
+
+class AnchorMultitoolRequest(BaseModel):
+    mode: str = Field(..., description="Operation mode: 'drop', 'list', 'remove', or 'rename'.")
+    # For 'drop' mode
+    path: Optional[str] = Field(None, description="Absolute path to the folder to register as a project root (required for 'drop').")
+    project_name: Optional[str] = Field(None, description="Alias for the project (optional for 'drop', defaults to folder name).")
+    # For 'remove' mode
+    # project_name is reused
+    # For 'rename' mode
+    old_name: Optional[str] = Field(None, description="Existing alias to rename (required for 'rename').")
+    new_name: Optional[str] = Field(None, description="New alias name (required for 'rename').")
 
 class CookbookMultitoolRequest(BaseModel):
     mode: str = Field(..., description="Operation mode: 'add', 'find', 'remove', or 'update'.")
@@ -1782,8 +2024,8 @@ def _update_cookbook_pattern_impl(request: CookbookMultitoolRequest) -> dict:
     except Exception as e:
         return {"status": "error", "message": f"Failed to update pattern: {e}"}
 
-@tool_process_timeout_and_errors(timeout=30)
 @mcp.tool()
+@tool_process_timeout_and_errors(timeout=30)
 def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     """
     Unified Code Cookbook multitool for adding, searching, removing, and updating code patterns with multi-language support.
@@ -1858,3 +2100,632 @@ def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
         return _update_cookbook_pattern_impl(request)
     else:
         return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add', 'find', 'remove', or 'update'."}
+
+# ---------------------------------------------------------------------------
+# Code Snippet Extraction Tool
+# ---------------------------------------------------------------------------
+
+def _detect_language_from_content(content: str, file_path: str) -> str:
+    """Enhanced language detection prioritizing file extension over content analysis."""
+    # File extension based detection (PRIORITY)
+    ext = pathlib.Path(file_path).suffix.lower()
+    ext_mapping = {
+        '.py': 'python', '.js': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
+        '.jsx': 'javascript', '.html': 'html', '.htm': 'html', '.json': 'json',
+        '.yaml': 'yaml', '.yml': 'yaml', '.md': 'markdown', '.txt': 'text'
+    }
+    
+    lang_from_ext = ext_mapping.get(ext, None)
+    
+    # If we have a confident extension match, use it
+    if lang_from_ext:
+        return lang_from_ext
+    
+    # Only use content-based detection for ambiguous/missing extensions
+    content_lower = content.lower().strip()
+    if 'def ' in content_lower and ':' in content_lower and ('import ' in content_lower or 'from ' in content_lower):
+        return 'python'
+    elif 'function ' in content_lower and ('const ' in content_lower or 'let ' in content_lower or '=>' in content_lower):
+        return 'javascript'
+    elif 'interface ' in content_lower or 'type ' in content_lower or ': string' in content_lower:
+        return 'typescript'
+    elif '<' in content_lower and '>' in content_lower and ('html' in content_lower or 'body' in content_lower):
+        return 'html'
+    
+    return lang_from_ext
+
+def _extract_python_snippet(content: str, mode: str, name: Optional[str] = None, 
+                           start_line: Optional[int] = None, end_line: Optional[int] = None,
+                           context_lines: int = 0) -> Dict[str, Any]:
+    """Extract Python code using AST with fallback to line-based extraction."""
+    try:
+        tree = ast.parse(content)
+        lines = content.splitlines()
+        
+        if mode in ['function', 'class'] and name:
+            target_type = ast.FunctionDef if mode == 'function' else ast.ClassDef
+            
+            for node in ast.walk(tree):
+                if isinstance(node, target_type) and node.name == name:
+                    # Include decorators if present
+                    actual_start = node.lineno
+                    if hasattr(node, 'decorator_list') and node.decorator_list:
+                        actual_start = node.decorator_list[0].lineno
+                    
+                    actual_end = getattr(node, 'end_lineno', node.lineno)
+                    
+                    # Apply context lines
+                    ctx_start = max(1, actual_start - context_lines)
+                    ctx_end = min(len(lines), actual_end + context_lines)
+                    
+                    snippet_lines = lines[ctx_start-1:ctx_end]
+                    return {
+                        'snippet': '\n'.join(snippet_lines),
+                        'start_line': ctx_start,
+                        'end_line': ctx_end,
+                        'actual_start': actual_start,
+                        'actual_end': actual_end
+                    }
+            
+            return {'error': f'{mode.capitalize()} "{name}" not found'}
+        
+        elif mode == 'lines' and start_line and end_line:
+            ctx_start = max(1, start_line - context_lines)
+            ctx_end = min(len(lines), end_line + context_lines)
+            
+            snippet_lines = lines[ctx_start-1:ctx_end]
+            return {
+                'snippet': '\n'.join(snippet_lines),
+                'start_line': ctx_start,
+                'end_line': ctx_end,
+                'actual_start': start_line,
+                'actual_end': end_line
+            }
+        
+    except SyntaxError as e:
+        logger.warning(f"AST parsing failed, falling back to line extraction: {e}")
+        # Fallback to simple line-based extraction
+        pass
+    
+    # Fallback: simple text search
+    lines = content.splitlines()
+    if mode in ['function', 'class'] and name:
+        pattern = f"{'def' if mode == 'function' else 'class'} {name}"
+        for i, line in enumerate(lines):
+            if pattern in line:
+                # Simple heuristic: find next function/class or end of file
+                end_idx = len(lines)
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip() and not lines[j].startswith((' ', '\t')):
+                        if 'def ' in lines[j] or 'class ' in lines[j]:
+                            end_idx = j
+                            break
+                
+                ctx_start = max(1, i + 1 - context_lines)
+                ctx_end = min(len(lines), end_idx + context_lines)
+                
+                snippet_lines = lines[ctx_start-1:ctx_end]
+                return {
+                    'snippet': '\n'.join(snippet_lines),
+                    'start_line': ctx_start,
+                    'end_line': ctx_end,
+                    'actual_start': i + 1,
+                    'actual_end': end_idx
+                }
+    
+    return {'error': f'Could not extract {mode} snippet'}
+
+def _extract_js_snippet(content: str, mode: str, name: Optional[str] = None,
+                       start_line: Optional[int] = None, end_line: Optional[int] = None,
+                       context_lines: int = 0) -> Dict[str, Any]:
+    """Extract JavaScript/TypeScript snippets with brace balancing."""
+    lines = content.splitlines()
+    
+    if mode == 'function' and name:
+        # Multiple function declaration patterns
+        patterns = [
+            rf'function\s+{re.escape(name)}\s*\(',
+            rf'const\s+{re.escape(name)}\s*=\s*\(',
+            rf'let\s+{re.escape(name)}\s*=\s*\(',
+            rf'var\s+{re.escape(name)}\s*=\s*\(',
+            rf'{re.escape(name)}\s*:\s*function\s*\(',
+            rf'{re.escape(name)}\s*=\s*\([^)]*\)\s*=>',
+            rf'const\s+{re.escape(name)}\s*=\s*[^=]*=>'
+        ]
+        
+        for i, line in enumerate(lines):
+            for pattern in patterns:
+                if re.search(pattern, line):
+                    # Find the end using brace balancing
+                    brace_count = 0
+                    start_found = False
+                    end_idx = len(lines)
+                    
+                    for j in range(i, len(lines)):
+                        current_line = lines[j]
+                        for char in current_line:
+                            if char == '{':
+                                brace_count += 1
+                                start_found = True
+                            elif char == '}' and start_found:
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = j + 1
+                                    break
+                        if brace_count == 0 and start_found:
+                            break
+                    
+                    ctx_start = max(1, i + 1 - context_lines)
+                    ctx_end = min(len(lines), end_idx + context_lines)
+                    
+                    snippet_lines = lines[ctx_start-1:ctx_end]
+                    return {
+                        'snippet': '\n'.join(snippet_lines),
+                        'start_line': ctx_start,
+                        'end_line': ctx_end,
+                        'actual_start': i + 1,
+                        'actual_end': end_idx
+                    }
+    
+    elif mode == 'lines' and start_line and end_line:
+        ctx_start = max(1, start_line - context_lines)
+        ctx_end = min(len(lines), end_line + context_lines)
+        
+        snippet_lines = lines[ctx_start-1:ctx_end]
+        return {
+            'snippet': '\n'.join(snippet_lines),
+            'start_line': ctx_start,
+            'end_line': ctx_end,
+            'actual_start': start_line,
+            'actual_end': end_line
+        }
+    
+    return {'error': f'Could not extract {mode} snippet'}
+
+def _extract_html_snippet(content: str, mode: str, name: Optional[str] = None,
+                         start_line: Optional[int] = None, end_line: Optional[int] = None,
+                         context_lines: int = 0) -> Dict[str, Any]:
+    """Extract HTML snippets, including JavaScript from script tags."""
+    lines = content.splitlines()
+    
+    if mode == 'function' and name:
+        # Look for JavaScript functions within script tags
+        in_script = False
+        script_content = []
+        script_start_line = 0
+        
+        for i, line in enumerate(lines):
+            if '<script' in line.lower():
+                in_script = True
+                script_start_line = i + 1
+                script_content = []
+            elif '</script>' in line.lower():
+                if in_script and script_content:
+                    # Try to extract function from collected script content
+                    script_text = '\n'.join(script_content)
+                    js_result = _extract_js_snippet(script_text, 'function', name, context_lines=0)
+                    if 'snippet' in js_result:
+                        # Adjust line numbers to account for HTML context
+                        actual_start = script_start_line + js_result['actual_start'] - 1
+                        actual_end = script_start_line + js_result['actual_end'] - 1
+                        
+                        ctx_start = max(1, actual_start - context_lines)
+                        ctx_end = min(len(lines), actual_end + context_lines)
+                        
+                        snippet_lines = lines[ctx_start-1:ctx_end]
+                        return {
+                            'snippet': '\n'.join(snippet_lines),
+                            'start_line': ctx_start,
+                            'end_line': ctx_end,
+                            'actual_start': actual_start,
+                            'actual_end': actual_end
+                        }
+                in_script = False
+            elif in_script:
+                script_content.append(line)
+    
+    elif mode == 'lines' and start_line and end_line:
+        ctx_start = max(1, start_line - context_lines)
+        ctx_end = min(len(lines), end_line + context_lines)
+        
+        snippet_lines = lines[ctx_start-1:ctx_end]
+        return {
+            'snippet': '\n'.join(snippet_lines),
+            'start_line': ctx_start,
+            'end_line': ctx_end,
+            'actual_start': start_line,
+            'actual_end': end_line
+        }
+    
+    return {'error': f'Could not extract {mode} snippet'}# This will be appended to toolz.py to add get_snippet tool
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=30)
+def get_snippet(request: SnippetRequest) -> Dict[str, Any]:
+    """
+    Extract code snippets from files with multi-language support and intelligent parsing.
+    
+    Args:
+        request (SnippetRequest): Contains file_path, mode ('function'|'class'|'lines'), 
+                                 name (for function/class), start_line/end_line (for lines).
+    
+    Returns:
+        dict: Status, snippet content, line numbers, detected language, and message.
+    """
+    logger.info(f"[get_snippet] Extracting {request.mode} from {request.file_path}")
+    
+    # Validate file path safety
+    file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(file_path):
+        return {'status': 'error', 'message': 'Access denied: Path is outside configured project roots.'}
+    
+    if not file_path.exists():
+        return {'status': 'error', 'message': f'File not found: {request.file_path}'}
+    
+    # Validate mode-specific requirements
+    if request.mode in ['function', 'class'] and not request.name:
+        return {'status': 'error', 'message': f'Missing name for {request.mode} mode'}
+    
+    if request.mode == 'lines' and (not request.start_line or not request.end_line):
+        return {'status': 'error', 'message': 'Missing start_line or end_line for lines mode'}
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        if not content.strip():
+            return {'status': 'error', 'message': 'File is empty'}
+        
+        # Detect language and extract
+        language = _detect_language_from_content(content, str(file_path))
+        
+        if language == 'python':
+            result = _extract_python_snippet(content, request.mode, request.name, 
+                                           request.start_line, request.end_line, 0)
+        elif language in ['javascript', 'typescript']:
+            result = _extract_js_snippet(content, request.mode, request.name,
+                                       request.start_line, request.end_line, 0)
+        elif language == 'html':
+            result = _extract_html_snippet(content, request.mode, request.name,
+                                         request.start_line, request.end_line, 0)
+        else:
+            # Generic line-based extraction
+            lines = content.splitlines()
+            if request.mode == 'lines' and request.start_line and request.end_line:
+                snippet_lines = lines[request.start_line-1:request.end_line]
+                result = {'snippet': '\n'.join(snippet_lines), 'start_line': request.start_line, 'end_line': request.end_line}
+            else:
+                result = {'error': f'Language {language} not supported for {request.mode} mode'}
+        
+        if 'error' in result:
+            return {'status': 'error', 'message': result['error']}
+        
+        return {
+            'status': 'success',
+            'snippet': result['snippet'],
+            'start_line': result['start_line'],
+            'end_line': result['end_line'],
+            'actual_start': result.get('actual_start', result['start_line']),
+            'actual_end': result.get('actual_end', result['end_line']),
+            'language': language,
+            'message': f'Successfully extracted {request.mode} snippet'
+        }
+        
+    except Exception as e:
+        logger.error(f"[get_snippet] Failed to extract snippet: {e}", exc_info=True)
+        return {'status': 'error', 'message': f'Failed to extract snippet: {e}'}
+# Introspect tool implementation to be appended to toolz.py
+
+@mcp.tool()
+@tool_timeout_and_errors(timeout=30)
+def introspect(request: IntrospectRequest) -> Dict[str, Any]:
+    """
+    Multi-modal code/project introspection tool for analysis of code and config files.
+    
+    Args:
+        request (IntrospectRequest): Contains mode ('config'|'outline'|'stats'|'inspect'),
+                                    file_path, and mode-specific parameters.
+    
+    Returns:
+        dict: Status, analysis results, and message based on the selected mode.
+    """
+    logger.info(f"[introspect] Mode: {request.mode}, File: {request.file_path}")
+    
+    try:
+        if request.mode == 'config':
+            return _introspect_config(request)
+        elif request.mode == 'outline':
+            return _introspect_outline(request)  
+        elif request.mode == 'stats':
+            return _introspect_stats(request)
+        elif request.mode == 'inspect':
+            return _introspect_inspect(request)
+        else:
+            return {'status': 'error', 'message': f'Invalid introspect mode: {request.mode}'}
+            
+    except Exception as e:
+        logger.error(f"[introspect] Failed: {e}", exc_info=True)
+        return {'status': 'error', 'message': f'Introspection failed: {e}'}
+
+def _introspect_config(request: IntrospectRequest) -> Dict[str, Any]:
+    """Analyze configuration files (pyproject.toml, requirements.txt, package.json, etc.)."""
+    if not request.file_path:
+        return {'status': 'error', 'message': 'file_path required for config mode'}
+    
+    file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(file_path):
+        return {'status': 'error', 'message': 'Access denied: Path is outside configured project roots.'}
+    
+    if not file_path.exists():
+        return {'status': 'error', 'message': f'File not found: {request.file_path}'}
+    
+    try:
+        content = file_path.read_text(encoding='utf-8', errors='ignore')
+        config_analysis = {}
+        
+        filename = file_path.name.lower()
+        
+        if filename == 'requirements.txt':
+            lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith('#')]
+            packages = []
+            for line in lines:
+                # Parse package specs like "requests>=2.25.1"
+                if '==' in line:
+                    name, version = line.split('==', 1)
+                    packages.append({'name': name.strip(), 'version': version.strip(), 'operator': '=='})
+                elif '>=' in line:
+                    name, version = line.split('>=', 1)  
+                    packages.append({'name': name.strip(), 'version': version.strip(), 'operator': '>='})
+                else:
+                    packages.append({'name': line.strip(), 'version': None, 'operator': None})
+            
+            config_analysis = {
+                'type': 'requirements.txt',
+                'packages': packages,
+                'package_count': len(packages)
+            }
+            
+        elif filename == 'package.json':
+            import json
+            try:
+                data = json.loads(content)
+                config_analysis = {
+                    'type': 'package.json',
+                    'name': data.get('name', 'unknown'),
+                    'version': data.get('version', 'unknown'),
+                    'dependencies': list(data.get('dependencies', {}).keys()),
+                    'devDependencies': list(data.get('devDependencies', {}).keys()),
+                    'scripts': list(data.get('scripts', {}).keys()),
+                    'dependency_count': len(data.get('dependencies', {})),
+                    'devDependency_count': len(data.get('devDependencies', {}))
+                }
+            except json.JSONDecodeError as e:
+                config_analysis = {'type': 'package.json', 'error': f'Invalid JSON: {e}'}
+                
+        elif filename in ['pyproject.toml', 'setup.cfg']:
+            config_analysis = {
+                'type': filename,
+                'content_preview': content[:500] + ('...' if len(content) > 500 else ''),
+                'lines': len(content.splitlines()),
+                'note': 'Full TOML parsing not implemented - showing preview'
+            }
+            
+        else:
+            config_analysis = {
+                'type': 'unknown_config',
+                'filename': filename,
+                'content_preview': content[:300] + ('...' if len(content) > 300 else ''),
+                'lines': len(content.splitlines())
+            }
+        
+        return {'status': 'success', 'analysis': config_analysis, 'message': f'Analyzed {filename}'}
+        
+    except Exception as e:
+        return {'status': 'error', 'message': f'Config analysis failed: {e}'}
+
+def _introspect_outline(request: IntrospectRequest) -> Dict[str, Any]:
+    """Generate outline of functions and classes in a file.""" 
+    if not request.file_path:
+        return {'status': 'error', 'message': 'file_path required for outline mode'}
+    
+    file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(file_path):
+        return {'status': 'error', 'message': 'Access denied: Path is outside configured project roots.'}
+    
+    if not file_path.exists():
+        return {'status': 'error', 'message': f'File not found: {request.file_path}'}
+    
+    try:
+        content = file_path.read_text(encoding='utf-8', errors='ignore')
+        language = _detect_language_from_content(content, str(file_path))
+        outline = []
+        
+        if language == 'python':
+            try:
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef):
+                        outline.append({
+                            'type': 'function',
+                            'name': node.name,
+                            'line': node.lineno,
+                            'end_line': getattr(node, 'end_lineno', node.lineno),
+                            'args': [arg.arg for arg in node.args.args] if node.args else []
+                        })
+                    elif isinstance(node, ast.ClassDef):
+                        outline.append({
+                            'type': 'class', 
+                            'name': node.name,
+                            'line': node.lineno,
+                            'end_line': getattr(node, 'end_lineno', node.lineno),
+                            'methods': [n.name for n in ast.walk(node) if isinstance(n, ast.FunctionDef)]
+                        })
+            except SyntaxError:
+                # Fallback to regex for Python
+                lines = content.splitlines()
+                for i, line in enumerate(lines, 1):
+                    if re.match(r'^\s*def\s+(\w+)', line):
+                        match = re.match(r'^\s*def\s+(\w+)', line)
+                        outline.append({'type': 'function', 'name': match.group(1), 'line': i})
+                    elif re.match(r'^\s*class\s+(\w+)', line):
+                        match = re.match(r'^\s*class\s+(\w+)', line)
+                        outline.append({'type': 'class', 'name': match.group(1), 'line': i})
+        
+        elif language in ['javascript', 'typescript']:
+            lines = content.splitlines()
+            for i, line in enumerate(lines, 1):
+                # Function patterns
+                if re.search(r'function\s+(\w+)', line):
+                    match = re.search(r'function\s+(\w+)', line)
+                    outline.append({'type': 'function', 'name': match.group(1), 'line': i})
+                elif re.search(r'const\s+(\w+)\s*=\s*\(.*\)\s*=>', line):
+                    match = re.search(r'const\s+(\w+)\s*=', line)
+                    outline.append({'type': 'function', 'name': match.group(1), 'line': i})
+                elif re.search(r'(\w+)\s*:\s*function', line):
+                    match = re.search(r'(\w+)\s*:\s*function', line)
+                    outline.append({'type': 'method', 'name': match.group(1), 'line': i})
+                # Class patterns
+                elif re.search(r'class\s+(\w+)', line):
+                    match = re.search(r'class\s+(\w+)', line)
+                    outline.append({'type': 'class', 'name': match.group(1), 'line': i})
+        
+        return {
+            'status': 'success', 
+            'outline': outline, 
+            'language': language,
+            'total_items': len(outline),
+            'message': f'Generated outline with {len(outline)} items'
+        }
+        
+    except Exception as e:
+        return {'status': 'error', 'message': f'Outline generation failed: {e}'}
+
+def _introspect_stats(request: IntrospectRequest) -> Dict[str, Any]:
+    """Generate code statistics for a file."""
+    if not request.file_path:
+        return {'status': 'error', 'message': 'file_path required for stats mode'}
+    
+    file_path = pathlib.Path(request.file_path)  
+    if not _is_safe_path(file_path):
+        return {'status': 'error', 'message': 'Access denied: Path is outside configured project roots.'}
+    
+    if not file_path.exists():
+        return {'status': 'error', 'message': f'File not found: {request.file_path}'}
+    
+    try:
+        content = file_path.read_text(encoding='utf-8', errors='ignore')
+        language = _detect_language_from_content(content, str(file_path))
+        
+        lines = content.splitlines()
+        total_lines = len(lines)
+        blank_lines = sum(1 for line in lines if not line.strip())
+        comment_lines = 0
+        
+        # Basic comment detection
+        if language == 'python':
+            comment_lines = sum(1 for line in lines if line.strip().startswith('#'))
+        elif language in ['javascript', 'typescript']:
+            comment_lines = sum(1 for line in lines if line.strip().startswith('//'))
+        
+        code_lines = total_lines - blank_lines - comment_lines
+        
+        # Function/class counts
+        function_count = 0
+        class_count = 0
+        
+        if language == 'python':
+            function_count = len(re.findall(r'^\s*def\s+\w+', content, re.MULTILINE))
+            class_count = len(re.findall(r'^\s*class\s+\w+', content, re.MULTILINE))
+        elif language in ['javascript', 'typescript']:
+            function_count = len(re.findall(r'function\s+\w+|const\s+\w+\s*=.*=>', content))
+            class_count = len(re.findall(r'class\s+\w+', content))
+        
+        stats = {
+            'file_size_bytes': file_path.stat().st_size,
+            'total_lines': total_lines,
+            'code_lines': code_lines,
+            'blank_lines': blank_lines,
+            'comment_lines': comment_lines,
+            'function_count': function_count,
+            'class_count': class_count,
+            'language': language
+        }
+        
+        return {'status': 'success', 'stats': stats, 'message': 'Generated code statistics'}
+        
+    except Exception as e:
+        return {'status': 'error', 'message': f'Stats generation failed: {e}'}
+
+def _introspect_inspect(request: IntrospectRequest) -> Dict[str, Any]:
+    """Inspect a specific function or class in detail."""
+    if not request.file_path:
+        return {'status': 'error', 'message': 'file_path required for inspect mode'}
+    
+    if not (request.function_name or request.class_name):
+        return {'status': 'error', 'message': 'function_name or class_name required for inspect mode'}
+    
+    file_path = pathlib.Path(request.file_path)
+    if not _is_safe_path(file_path):
+        return {'status': 'error', 'message': 'Access denied: Path is outside configured project roots.'}
+    
+    if not file_path.exists():
+        return {'status': 'error', 'message': f'File not found: {request.file_path}'}
+    
+    try:
+        content = file_path.read_text(encoding='utf-8', errors='ignore')
+        language = _detect_language_from_content(content, str(file_path))
+        target_name = request.function_name or request.class_name
+        target_type = 'function' if request.function_name else 'class'
+        
+        inspection = {'name': target_name, 'type': target_type, 'language': language}
+        
+        if language == 'python':
+            try:
+                tree = ast.parse(content)
+                target_ast_type = ast.FunctionDef if target_type == 'function' else ast.ClassDef
+                
+                for node in ast.walk(tree):
+                    if isinstance(node, target_ast_type) and node.name == target_name:
+                        inspection.update({
+                            'line': node.lineno,
+                            'end_line': getattr(node, 'end_lineno', node.lineno),
+                            'docstring': ast.get_docstring(node) if hasattr(ast, 'get_docstring') else None
+                        })
+                        
+                        if target_type == 'function' and hasattr(node, 'args'):
+                            inspection['parameters'] = [arg.arg for arg in node.args.args]
+                        elif target_type == 'class':
+                            methods = [n.name for n in ast.walk(node) if isinstance(n, ast.FunctionDef)]
+                            inspection['methods'] = methods
+                        break
+                        
+            except SyntaxError:
+                pass  # Will use regex fallback
+        
+        # Regex fallback for all languages
+        if 'line' not in inspection:
+            lines = content.splitlines()
+            if target_type == 'function':
+                pattern = rf"^\s*(?:function\s+{re.escape(target_name)}|def\s+{re.escape(target_name)}|const\s+{re.escape(target_name)}\s*=)"
+            else:
+                pattern = rf"^\s*class\s+{re.escape(target_name)}"
+            
+            for i, line in enumerate(lines, 1):
+                if re.search(pattern, line):
+                    inspection['line'] = i
+                    inspection['signature'] = line.strip()
+                    
+                    # Look for docstring/comment in next few lines
+                    for j in range(i, min(i + 5, len(lines))):
+                        if lines[j].strip().startswith('"""') or lines[j].strip().startswith("'''"):
+                            inspection['docstring'] = lines[j].strip()
+                            break
+                    break
+        
+        if 'line' in inspection:
+            return {'status': 'success', 'inspection': inspection, 'message': f'Inspected {target_type} "{target_name}"'}
+        else:
+            return {'status': 'error', 'message': f'{target_type.capitalize()} "{target_name}" not found'}
+            
+    except Exception as e:
+        return {'status': 'error', 'message': f'Inspection failed: {e}'}
