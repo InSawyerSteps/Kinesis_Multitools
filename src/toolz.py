@@ -317,8 +317,8 @@ def _get_project_path(project_name: str) -> Optional[pathlib.Path]:
     """Gets the root path for a given project name."""
     return PROJECT_ROOTS.get(project_name)
 
-def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
-    """Yields all files under root, skipping common dependency/VCS and binary files."""
+def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None, max_return: int = 1000):
+    """Yields up to max_return files under root, skipping common dependency/VCS and binary files."""
     exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".vscode", ".idea", "dist", "build"}
     binary_extensions = {
         ".zip", ".gz", ".tar", ".rar", ".7z", ".exe", ".dll", ".so", ".a",
@@ -329,25 +329,40 @@ def _iter_files(root: pathlib.Path, extensions: Optional[List[str]] = None):
     }
     norm_exts = {f".{e.lower().lstrip('.')}" for e in extensions} if extensions else None
 
-    for p in root.rglob('*'):
-        # Check if any part of the path is in the exclude list
-        if any(part in exclude_dirs for part in p.parts):
-            continue
+    from collections import deque
+    dirs_to_scan = deque([root])
+    files_processed = 0
+    files_yielded = 0
+    max_files = 20000  # Hard safety cap
 
-        if not p.is_file():
+    while dirs_to_scan and files_processed < max_files and files_yielded < max_return:
+        current_dir = dirs_to_scan.popleft()
+        try:
+            if current_dir.name in exclude_dirs:
+                continue
+            for item in current_dir.iterdir():
+                files_processed += 1
+                if files_processed >= max_files:
+                    logger.warning(f"[_iter_files] Processed over {max_files} items. Stopping traversal as a safety measure.")
+                    return
+                if files_yielded >= max_return:
+                    return
+                if item.is_dir():
+                    if item.name not in exclude_dirs:
+                        dirs_to_scan.append(item)
+                elif item.is_file():
+                    if item.suffix.lower() in binary_extensions:
+                        continue
+                    item_str = str(item).lower()
+                    if ".windsurf_search_index" in item_str or item_str.endswith(".json"):
+                        continue
+                    if extensions and item.suffix.lower() not in norm_exts:
+                        continue
+                    yield item
+                    files_yielded += 1
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Skipping directory {current_dir} due to access error: {e}")
             continue
-        
-        # Skip binary files
-        if p.suffix.lower() in binary_extensions:
-            continue
-
-        # Exclude .windsurf_search_index and any .json files (case-insensitive)
-        p_str = str(p).lower()
-        if ".windsurf_search_index" in p_str or p_str.endswith(".json"):
-            continue
-        if extensions and p.suffix.lower() not in norm_exts:
-            continue
-        yield p
 
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Encodes a batch of texts into vector embeddings using the lazily-loaded model."""
@@ -370,53 +385,91 @@ def _is_safe_path(path: pathlib.Path) -> bool:
     return False
 
 # ---------------------------------------------------------------------------
+# Project Root Registration Tool
+# ---------------------------------------------------------------------------
+
+@tool_timeout_and_errors(timeout=10)
+@mcp.tool()
+def anchor_drop(path: str, project_name: Optional[str] = None) -> dict:
+    """
+    Dynamically register a project root at runtime, enabling all project-based tools to operate on the specified folder.
+
+    Args:
+        path (str): Absolute path to the folder to register as a project root.
+        project_name (str, optional): Alias for the project. Defaults to the folder name if not provided.
+
+    Returns:
+        dict: Status, message, and current project roots.
+
+    Usage:
+        - Call this tool with the desired path (and optional alias) to register a new project root.
+        - All project-based tools (index, search, read, list) will immediately recognize the new root.
+    """
+    logger.info(f"[anchor_drop] Registering project root: path={path}, project_name={project_name}")
+    try:
+        base_path = pathlib.Path(path).resolve()
+        if not base_path.exists() or not base_path.is_dir():
+            return {"status": "error", "message": f"Path does not exist or is not a directory: {path}"}
+        alias = project_name if project_name else base_path.name
+        PROJECT_ROOTS[alias] = base_path
+        logger.info(f"[anchor_drop] Registered project root: {alias} -> {base_path}")
+        return {
+            "status": "success",
+            "message": f"Registered project root '{alias}' at '{base_path}'.",
+            "project_roots": {k: str(v) for k, v in PROJECT_ROOTS.items()}
+        }
+    except Exception as e:
+        logger.error(f"[anchor_drop] Failed to register project root: {e}")
+        return {"status": "error", "message": f"Failed to register project root: {e}"}
+
+# ---------------------------------------------------------------------------
 # General-purpose Project Tools (migrated from toolz.py)
 
 @mcp.tool()
-def list_files_anywhere(
-    directory_path: str,
-    extensions: Optional[List[str]] = None,
-    max_items: int = 1000
-) -> dict:
+@tool_timeout_and_errors(timeout=60)
+def list_project_files(project_name: str, extensions: Optional[List[str]] = None, max_items: int = 1000) -> Dict[str, Any]:
     """
-    List files under any absolute directory path, optionally filtering by extension.
+    List files under a registered project root (supports dynamic roots via anchor_drop),
+    optionally filtering by extension.
 
     Args:
-        directory_path (str): Absolute path to the directory to scan.
+        project_name (str): Name of the registered project (see PROJECT_ROOTS / anchor_drop).
         extensions (List[str], optional): List of file extensions to include (e.g., ["py", "md"]). If omitted, all files are included.
         max_items (int, optional): Maximum number of files to return (default: 1000).
 
     Returns:
         dict: {
             'status': 'success'|'error',
-            'files': List[str],  # Only present if status == 'success'
-            'message': str       # Error message if status == 'error'
+            'files': List[str],        # Only present if status == 'success'
+            'count': int,              # Number of files returned
+            'project_root': str,       # Absolute path to root used
+            'message': str             # Error message if status == 'error'
         }
     """
-    import pathlib, os
-    from typing import List, Optional, Dict, Any
-    results = []
+    results: List[str] = []
     try:
-        root = pathlib.Path(directory_path)
-        if not root.is_dir():
-            return {"status": "error", "message": f"Not a directory: {directory_path}"}
-        if extensions:
-            norm_exts = {f".{str(e).lower().lstrip('.')}" for e in extensions if isinstance(e, str)}
-        else:
-            norm_exts = None
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            for fname in filenames:
-                fpath = pathlib.Path(dirpath) / fname
-                if fpath.is_symlink():
-                    continue
-                if norm_exts and fpath.suffix.lower() not in norm_exts:
-                    continue
-                results.append(str(fpath.resolve()))
-                if len(results) >= max_items:
-                    return {"status": "success", "files": results}
-        return {"status": "success", "files": results}
+        project_path = _get_project_path(project_name)
+        if project_path is None:
+            available = ", ".join(sorted(PROJECT_ROOTS.keys()))
+            msg = f"Unknown project '{project_name}'. Available projects: [{available}]"
+            logger.error("[list_project_files] %s", msg)
+            return {"status": "error", "message": msg}
+
+        for fp in _iter_files(project_path, extensions, max_return=max_items):
+            results.append(str(fp.resolve()))
+
+        logger.info("[list_project_files] Found %d paths for project '%s' at root %s.", len(results), project_name, project_path)
+        return {
+            "status": "success",
+            "files": results,
+            "count": len(results),
+            "project_root": str(project_path),
+        }
     except Exception as e:
+        logger.error("[list_project_files] Error listing files for project '%s': %s", project_name, e, exc_info=True)
         return {"status": "error", "message": str(e)}
+
+@mcp.tool()
 @tool_timeout_and_errors(timeout=60)
 def read_project_file(absolute_file_path: str, max_bytes: int = 2_000_000) -> Dict[str, Any]:
     """
@@ -1132,459 +1185,475 @@ OLLAMA_MODEL_FOR_TESTS = os.environ.get("OLLAMA_MODEL_FOR_TESTS", _OLLAMA_MAIN_M
 COOKBOOK_DIR_NAME = ".project_cookbook"
 
 class CookbookMultitoolRequest(BaseModel):
-    mode: str = Field(..., description="Operation mode: 'add' or 'find'.")
-    # For 'add' mode
-    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add').")
-    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add').")
-    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add').")
-    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add').")
+    mode: str = Field(..., description="Operation mode: 'add', 'find', 'remove', or 'update'.")
+    # For 'add' and 'update' modes
+    pattern_name: Optional[str] = Field(None, description="Unique name for the pattern (required for 'add', 'remove', 'update').")
+    file_path: Optional[str] = Field(None, description="Absolute path to the file containing the function (required for 'add', optional for 'update').")
+    function_name: Optional[str] = Field(None, description="Name of the function to save as a pattern (required for 'add', optional for 'update').")
+    description: Optional[str] = Field(None, description="Short description of the pattern (required for 'add', optional for 'update').")
     # For 'find' mode
     query: Optional[str] = Field(None, description="Search query for finding patterns (required for 'find').")
+    # Multi-language support (new fields)
+    language: Optional[str] = Field(None, description="Language hint: 'python', 'javascript', 'typescript', 'html', 'json', 'text', or 'auto' (default: 'auto').")
+    code_snippet: Optional[str] = Field(None, description="Raw code or text snippet to store directly (alternative to file extraction).")
+    start_marker: Optional[str] = Field(None, description="Start marker for text extraction between markers (works with end_marker).")
+    end_marker: Optional[str] = Field(None, description="End marker for text extraction between markers (works with start_marker).")
 
-def _add_to_cookbook_impl(request: AddToCookbookRequest) -> dict:
-    logger.info(f"[add_to_cookbook] Adding pattern '{request.pattern_name}' from {request.file_path}::{request.function_name}")
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+class AddToCookbookRequest(BaseModel):
+    pattern_name: str = Field(..., description="Unique name for the pattern.")
+    file_path: str = Field(..., description="Absolute path to the file containing the function.")
+    function_name: str = Field(..., description="Name of the function to save as a pattern.")
+    description: str = Field(..., description="Short description of the pattern.")
+
+class FindInCookbookRequest(BaseModel):
+    query: str = Field(..., description="Search query for finding patterns.")
+
+# Multi-language extraction helpers
+def _detect_language_by_ext(file_path: str, explicit_language: Optional[str]) -> str:
+    """Detect language by file extension or explicit hint."""
+    if explicit_language and explicit_language.lower() != "auto":
+        return explicit_language.lower()
+    
+    ext = pathlib.Path(file_path).suffix.lower() if file_path else ""
+    language_map = {
+        ".py": "python",
+        ".js": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".jsx": "javascript",
+        ".html": "html",
+        ".htm": "html",
+        ".json": "json",
+        ".md": "text",
+        ".txt": "text",
+    }
+    return language_map.get(ext, "text")
+
+def _extract_js_function(text: str, function_name: str) -> Optional[str]:
+    """Extract JavaScript/TypeScript function using regex and brace balancing."""
+    patterns = [
+        re.compile(rf"(?:export\s+)?function\s+{re.escape(function_name)}\s*\(", re.MULTILINE),
+        re.compile(rf"const\s+{re.escape(function_name)}\s*=\s*function\s*\(", re.MULTILINE),
+        re.compile(rf"const\s+{re.escape(function_name)}\s*=\s*\([^)]*\)\s*=>\s*\{{", re.MULTILINE),
+        re.compile(rf"function\s+{re.escape(function_name)}\s*\(", re.MULTILINE),
+        re.compile(rf"let\s+{re.escape(function_name)}\s*=\s*function\s*\(", re.MULTILINE),
+        re.compile(rf"var\s+{re.escape(function_name)}\s*=\s*function\s*\(", re.MULTILINE),
+    ]
+    
+    for pattern in patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+            
+        # Find the opening brace and extract balanced content
+        start_pos = match.start()
+        brace_pos = text.find("{", match.end() - 1)
+        if brace_pos == -1:
+            continue
+            
+        # Simple brace counting (not perfect but functional)
+        depth = 1
+        pos = brace_pos + 1
+        in_string = False
+        string_char = None
+        escaped = False
+        
+        while pos < len(text) and depth > 0:
+            char = text[pos]
+            
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif in_string:
+                if char == string_char:
+                    in_string = False
+            elif char in ('"', "'", "`"):
+                in_string = True
+                string_char = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                
+            pos += 1
+        
+        if depth == 0:
+            return text[start_pos:pos]
+    
+    return None
+
+def _extract_from_html(text: str, function_name: Optional[str] = None, 
+                      start_marker: Optional[str] = None, end_marker: Optional[str] = None) -> Optional[str]:
+    """Extract content from HTML file using function name or markers."""
+    if start_marker and end_marker:
+        start_idx = text.find(start_marker)
+        if start_idx == -1:
+            return None
+        end_idx = text.find(end_marker, start_idx + len(start_marker))
+        if end_idx == -1:
+            return None
+        return text[start_idx:end_idx + len(end_marker)]
+    
+    if function_name:
+        # Look for JavaScript functions within <script> blocks
+        script_pattern = re.compile(r'<script[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+        for match in script_pattern.finditer(text):
+            script_content = match.group(1)
+            extracted = _extract_js_function(script_content, function_name)
+            if extracted:
+                return extracted
+    
+    return None
+
+def _extract_by_markers(text: str, start_marker: str, end_marker: str) -> Optional[str]:
+    """Extract text content between start and end markers."""
+    start_idx = text.find(start_marker)
+    if start_idx == -1:
+        return None
+    end_idx = text.find(end_marker, start_idx + len(start_marker))
+    if end_idx == -1:
+        return None
+    return text[start_idx:end_idx + len(end_marker)]
+
+def _add_to_cookbook_impl(request) -> dict:
+    """Multi-language cookbook implementation supporting both legacy AddToCookbookRequest and new CookbookMultitoolRequest."""
+    # Handle both legacy and new request types
+    if hasattr(request, 'mode'):  # CookbookMultitoolRequest
+        pattern_name = request.pattern_name
+        file_path = request.file_path
+        function_name = request.function_name
+        description = request.description
+        language = getattr(request, 'language', None)
+        code_snippet = getattr(request, 'code_snippet', None)
+        start_marker = getattr(request, 'start_marker', None)
+        end_marker = getattr(request, 'end_marker', None)
+    else:  # Legacy AddToCookbookRequest
+        pattern_name = request.pattern_name
+        file_path = request.file_path
+        function_name = request.function_name
+        description = request.description
+        language = None
+        code_snippet = None
+        start_marker = None
+        end_marker = None
+    
+    logger.info(f"[add_to_cookbook] Adding pattern '{pattern_name}' (language: {language or 'auto'})")
+    
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     cookbook_dir.mkdir(exist_ok=True)
-    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', pattern_name) + ".json"
     output_path = cookbook_dir / safe_filename
+    
     if output_path.exists():
-        return {"status": "error", "message": f"Pattern '{request.pattern_name}' already exists at {output_path}"}
-    source_file_path = pathlib.Path(request.file_path)
+        return {"status": "error", "message": f"Pattern '{pattern_name}' already exists at {output_path}"}
+    
+    # Handle direct code snippet
+    if code_snippet:
+        detected_language = _detect_language_by_ext(file_path or "", language)
+        pattern_data = {
+            "pattern_name": pattern_name,
+            "description": description,
+            "language": detected_language,
+            "locator": {"type": "snippet"},
+            "extraction_strategy": "snippet",
+            "source_code": code_snippet,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if file_path:
+            pattern_data["file_path"] = file_path
+        
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(pattern_data, f, indent=4)
+            logger.info(f"[add_to_cookbook] Successfully saved snippet pattern to {output_path}")
+            return {"status": "success", "message": f"Pattern '{pattern_name}' was successfully added to the cookbook."}
+        except Exception as e:
+            logger.error(f"[add_to_cookbook] Failed to write pattern file {output_path}: {e}")
+            return {"status": "error", "message": f"Failed to write pattern file: {e}"}
+    
+    # File-based extraction
+    if not file_path:
+        return {"status": "error", "message": "Either 'file_path' or 'code_snippet' must be provided."}
+    
+    source_file_path = pathlib.Path(file_path)
     if not _is_safe_path(source_file_path):
         return {"status": "error", "message": "Access denied: Source file path is outside configured project roots."}
     if not source_file_path.is_file():
-        return {"status": "error", "message": f"Source file not found at: {request.file_path}"}
+        return {"status": "error", "message": f"Source file not found at: {file_path}"}
+    
     try:
         source_code_text = source_file_path.read_text("utf-8")
-        tree = ast.parse(source_code_text)
-        class FunctionFinder(ast.NodeVisitor):
-            def __init__(self, target_name):
-                self.target_name = target_name
-                self.found_node = None
-            def visit_FunctionDef(self, node):
-                if node.name == self.target_name:
-                    self.found_node = node
-                self.generic_visit(node)
-        finder = FunctionFinder(request.function_name)
-        finder.visit(tree)
-        if not finder.found_node:
-            return {"status": "error", "message": f"Could not find function '{request.function_name}' in '{request.file_path}'."}
-        function_source = ast.get_source_segment(source_code_text, finder.found_node)
-        if not function_source:
-             return {"status": "error", "message": f"Could not extract source for function '{request.function_name}'."}
     except Exception as e:
-        logger.error(f"[add_to_cookbook] AST parsing failed for {request.file_path}: {e}")
-        return {"status": "error", "message": f"Failed to parse or read source file: {e}"}
+        return {"status": "error", "message": f"Failed to read source file: {e}"}
+    
+    detected_language = _detect_language_by_ext(file_path, language)
+    extracted_code = None
+    extraction_strategy = None
+    locator = {}
+    
+    # Try marker-based extraction first
+    if start_marker and end_marker:
+        extracted_code = _extract_by_markers(source_code_text, start_marker, end_marker)
+        if extracted_code:
+            extraction_strategy = "markers"
+            locator = {"type": "markers", "start_marker": start_marker, "end_marker": end_marker}
+        else:
+            return {"status": "error", "message": f"Could not find content between markers '{start_marker}' and '{end_marker}'."}
+    
+    # Try function extraction if no markers or markers failed
+    elif function_name:
+        if detected_language == "python":
+            try:
+                tree = ast.parse(source_code_text)
+                class FunctionFinder(ast.NodeVisitor):
+                    def __init__(self, target_name):
+                        self.target_name = target_name
+                        self.found_node = None
+                    def visit_FunctionDef(self, node):
+                        if node.name == self.target_name:
+                            self.found_node = node
+                        self.generic_visit(node)
+                finder = FunctionFinder(function_name)
+                finder.visit(tree)
+                if finder.found_node:
+                    extracted_code = ast.get_source_segment(source_code_text, finder.found_node)
+                    extraction_strategy = "python_ast"
+                    locator = {"type": "function_name", "function_name": function_name}
+            except Exception as e:
+                logger.warning(f"[add_to_cookbook] Python AST parsing failed: {e}")
+        
+        elif detected_language in ("javascript", "typescript"):
+            extracted_code = _extract_js_function(source_code_text, function_name)
+            if extracted_code:
+                extraction_strategy = "js_regex"
+                locator = {"type": "function_name", "function_name": function_name}
+        
+        elif detected_language == "html":
+            extracted_code = _extract_from_html(source_code_text, function_name, start_marker, end_marker)
+            if extracted_code:
+                extraction_strategy = "js_regex" if function_name else "markers"
+                locator = {"type": "function_name", "function_name": function_name} if function_name else {"type": "markers"}
+    
+    # Fallback: whole file or provide guidance
+    if not extracted_code:
+        if not function_name and not start_marker:
+            # Store whole file for non-Python languages without specific extraction
+            if detected_language in ("json", "text"):
+                extracted_code = source_code_text
+                extraction_strategy = "whole_file"
+                locator = {"type": "whole_file"}
+            else:
+                return {"status": "error", 
+                       "message": f"Could not extract content. For {detected_language} files, provide either 'function_name', 'start_marker'+'end_marker', or 'code_snippet'."}
+        else:
+            error_msg = f"Could not find function '{function_name}' in {detected_language} file." if function_name else "Extraction failed."
+            if detected_language not in ("python", "javascript", "typescript", "html"):
+                error_msg += f" Try using 'start_marker'+'end_marker' for {detected_language} files."
+            return {"status": "error", "message": error_msg}
+    
+    # Create pattern data with richer metadata
     pattern_data = {
-        "pattern_name": request.pattern_name,
-        "description": request.description,
-        "source_file": request.file_path,
-        "function_name": request.function_name,
-        "source_code": function_source,
+        "pattern_name": pattern_name,
+        "description": description,
+        "language": detected_language,
+        "file_path": file_path,
+        "locator": locator,
+        "extraction_strategy": extraction_strategy,
+        "source_code": extracted_code,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # Legacy fields for backward compatibility
+        "source_file": file_path,
+        "function_name": function_name,
         "added_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    
     try:
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(pattern_data, f, indent=4)
-        logger.info(f"[add_to_cookbook] Successfully saved pattern to {output_path}")
-        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was successfully added to the cookbook."}
+        logger.info(f"[add_to_cookbook] Successfully saved {detected_language} pattern to {output_path}")
+        return {"status": "success", "message": f"Pattern '{pattern_name}' was successfully added to the cookbook."}
     except Exception as e:
         logger.error(f"[add_to_cookbook] Failed to write pattern file {output_path}: {e}")
         return {"status": "error", "message": f"Failed to write pattern file: {e}"}
 
-def _find_in_cookbook_impl(request: FindInCookbookRequest) -> dict:
-    logger.info(f"[find_in_cookbook] Searching for pattern with query: '{request.query}'")
-    project_path = _get_project_path("MCP-Server")
-    if not project_path:
-        return {"status": "error", "message": "Project 'MCP-Server' not found."}
-    cookbook_dir = project_path / COOKBOOK_DIR_NAME
+def _find_in_cookbook_impl(request) -> dict:
+    """Enhanced find implementation supporting language filtering."""
+    # Handle both request types
+    if hasattr(request, 'mode'):  # CookbookMultitoolRequest
+        query = request.query
+        language_filter = getattr(request, 'language', None)
+    else:  # Legacy FindInCookbookRequest
+        query = request.query
+        language_filter = None
+    
+    logger.info(f"[find_in_cookbook] Searching for pattern with query: '{query}' (language: {language_filter or 'any'})")
+    
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
     if not cookbook_dir.is_dir():
         return {"status": "not_found", "message": "Cookbook directory does not exist. Add a pattern first."}
+    
     matches = []
-    query_lower = request.query.lower()
+    query_lower = query.lower()
+    
     for pattern_file in cookbook_dir.glob("*.json"):
         try:
             with open(pattern_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            searchable_text = f"{data.get('pattern_name', '')} {data.get('description', '')} {data.get('function_name', '')}".lower()
+            
+            # Language filtering
+            if language_filter and language_filter.lower() != "any":
+                pattern_language = data.get('language', 'unknown').lower()
+                if pattern_language != language_filter.lower():
+                    continue
+            
+            # Enhanced searchable text including new metadata
+            searchable_text = " ".join([
+                data.get('pattern_name', ''),
+                data.get('description', ''),
+                data.get('function_name', ''),
+                data.get('language', ''),
+                data.get('extraction_strategy', '')
+            ]).lower()
+            
             if query_lower in searchable_text:
                 matches.append(data)
+                
         except Exception as e:
             logger.warning(f"[find_in_cookbook] Could not read or parse pattern file {pattern_file}: {e}")
             continue
+    
     if not matches:
-        return {"status": "not_found", "message": f"No patterns found matching the query: '{request.query}'"}
+        lang_msg = f" (language: {language_filter})" if language_filter else ""
+        return {"status": "not_found", "message": f"No patterns found matching the query: '{query}'{lang_msg}"}
+    
     return {"status": "success", "results": matches}
 
+
+def _remove_from_cookbook_impl(pattern_name: str) -> dict:
+    """
+    Removes a pattern from the cookbook by pattern_name.
+    Returns success or error dict.
+    """
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{pattern_name}' does not exist."}
+    try:
+        pattern_path.unlink()
+        return {"status": "success", "message": f"Pattern '{pattern_name}' was removed from the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to remove pattern: {e}"}
+
+
+def _update_cookbook_pattern_impl(request: CookbookMultitoolRequest) -> dict:
+    """
+    Updates a pattern in the cookbook by pattern_name. Only provided fields are updated.
+    Returns success or error dict.
+    """
+    base_dir = pathlib.Path(r"C:\Projects\MCP Server")
+    cookbook_dir = base_dir / COOKBOOK_DIR_NAME
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', request.pattern_name) + ".json"
+    pattern_path = cookbook_dir / safe_filename
+    if not pattern_path.exists():
+        return {"status": "error", "message": f"Pattern '{request.pattern_name}' does not exist."}
+    try:
+        with open(pattern_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Only update fields that are provided
+        if request.file_path:
+            data["source_file"] = request.file_path
+        if request.function_name:
+            data["function_name"] = request.function_name
+        if request.description:
+            data["description"] = request.description
+        with open(pattern_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return {"status": "success", "message": f"Pattern '{request.pattern_name}' was updated in the cookbook."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update pattern: {e}"}
+
+@tool_process_timeout_and_errors(timeout=30)
 @mcp.tool()
-@tool_timeout_and_errors(timeout=30)
 def cookbook_multitool(request: CookbookMultitoolRequest) -> dict:
     """
-    Unified Code Cookbook multitool for adding and searching code patterns.
+    Unified Code Cookbook multitool for adding, searching, removing, and updating code patterns with multi-language support.
 
     Args:
         request (CookbookMultitoolRequest):
-            - mode (str): 'add' to save a new pattern, 'find' to search for patterns.
-            - pattern_name (str, required for 'add'): Unique name for the pattern.
-            - file_path (str, required for 'add'): Absolute path to the file containing the function.
-            - function_name (str, required for 'add'): Name of the function to save.
-            - description (str, required for 'add'): Description of the pattern.
+            - mode (str): 'add' to save a new pattern, 'find' to search for patterns, 'remove' to remove a pattern, 'update' to update a pattern.
+            - pattern_name (str, required for 'add', 'remove', 'update'): Unique name for the pattern.
+            - file_path (str, optional): Absolute path to the file containing the code.
+            - function_name (str, optional): Name of the function to extract.
+            - description (str, required for 'add', optional for 'update'): Description of the pattern.
             - query (str, required for 'find'): Search query for finding patterns.
+            - language (str, optional): Language hint ('python', 'javascript', 'typescript', 'html', 'json', 'text', or 'auto').
+            - code_snippet (str, optional): Raw code or text snippet to store directly.
+            - start_marker (str, optional): Start marker for text extraction between markers.
+            - end_marker (str, optional): End marker for text extraction between markers.
 
     Returns:
         dict: Status and results or error message.
 
+    Multi-Language Support:
+        - Python: AST-based function extraction (existing behavior)
+        - JavaScript/TypeScript: Regex-based function extraction with brace balancing
+        - HTML: JavaScript function extraction from <script> blocks or marker-based extraction
+        - JSON/Text: Marker-based extraction or whole-file storage
+        - Any language: Direct code snippet storage or marker-based extraction
+
     Usage:
-        - To add: mode='add', pattern_name, file_path, function_name, description
-        - To find: mode='find', query
+        - Add Python function: mode='add', pattern_name, file_path, function_name, description
+        - Add JS function: mode='add', pattern_name, file_path, function_name, description, language='javascript'
+        - Add by markers: mode='add', pattern_name, file_path, start_marker, end_marker, description
+        - Add snippet: mode='add', pattern_name, code_snippet, description, language='json'
+        - Find patterns: mode='find', query, language='javascript' (optional filter)
+        - Remove: mode='remove', pattern_name
+        - Update: mode='update', pattern_name, [fields to update]
     """
     logger.info(f"[cookbook_multitool] mode={request.mode}")
     if request.mode == "add":
-        missing = [f for f in ["pattern_name", "file_path", "function_name", "description"] if getattr(request, f) is None]
+        # Validate required fields with enhanced logic
+        missing = []
+        if not request.pattern_name:
+            missing.append("pattern_name")
+        if not request.description:
+            missing.append("description")
+        
+        # Flexible validation: need either (file_path + function_name) OR (file_path + markers) OR code_snippet
+        has_file_and_function = request.file_path and request.function_name
+        has_file_and_markers = request.file_path and request.start_marker and request.end_marker
+        has_snippet = request.code_snippet
+        
+        if not (has_file_and_function or has_file_and_markers or has_snippet):
+            return {
+                "status": "error", 
+                "message": "For 'add' mode, provide either: (file_path + function_name) OR (file_path + start_marker + end_marker) OR code_snippet"
+            }
+        
         if missing:
             return {"status": "error", "message": f"Missing required fields for 'add': {', '.join(missing)}"}
-        add_req = AddToCookbookRequest(
-            pattern_name=request.pattern_name,
-            file_path=request.file_path,
-            function_name=request.function_name,
-            description=request.description
-        )
-        return _add_to_cookbook_impl(add_req)
+        
+        return _add_to_cookbook_impl(request)
     elif request.mode == "find":
         if not request.query:
             return {"status": "error", "message": "Missing 'query' for 'find' mode."}
-        find_req = FindInCookbookRequest(query=request.query)
-        return _find_in_cookbook_impl(find_req)
+        return _find_in_cookbook_impl(request)
+    elif request.mode == "remove":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'remove' mode."}
+        return _remove_from_cookbook_impl(request.pattern_name)
+    elif request.mode == "update":
+        if not request.pattern_name:
+            return {"status": "error", "message": "Missing 'pattern_name' for 'update' mode."}
+        return _update_cookbook_pattern_impl(request)
     else:
-        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add' or 'find'."}
-
-
-# --- Tool: get_snippet ---
-import ast
-
-@mcp.tool()
-@tool_timeout_and_errors(timeout=10)
-def get_snippet(request: SnippetRequest) -> dict:
-    """
-    Extract a precise code snippet from a file by function, class, or line range.
-
-    This tool allows you to programmatically extract:
-      - The full source of a named function (including decorators and signature)
-      - The full source of a named class (including decorators and signature)
-      - An arbitrary range of lines from any text file
-
-    Args:
-        request (SnippetRequest):
-            - file_path (str): Absolute path to the file to extract from. Must be within the project root.
-            - mode (str): Extraction mode. One of:
-                * 'function': Extract a named function by its name.
-                * 'class': Extract a named class by its name.
-                * 'lines': Extract a specific line range.
-            - name (str, optional): Required for 'function' and 'class' modes. The name of the function or class to extract.
-            - start_line (int, optional): Required for 'lines' mode. 1-indexed starting line.
-            - end_line (int, optional): Required for 'lines' mode. 1-indexed ending line (inclusive).
-
-    Returns:
-        dict: Structured JSON response with status and result:
-            - status (str): 'success', 'error', or 'not_found'
-            - snippet (str, optional): The extracted code snippet (if found)
-            - message (str): Human-readable status or error message
-
-    Usage Examples:
-        # Extract a function
-        {
-            "file_path": "/project/src/foo.py",
-            "mode": "function",
-            "name": "my_func"
-        }
-        # Extract lines 10-20
-        {
-            "file_path": "/project/src/foo.py",
-            "mode": "lines",
-            "start_line": 10,
-            "end_line": 20
-        }
-
-    Notes:
-        - Returns an error if the file is outside the project root or does not exist.
-        - For 'function' and 'class', uses Python AST for precise extraction.
-        - For 'lines', both start and end are inclusive and 1-indexed.
-    """
-    import pathlib
-    logger = globals().get('logger', None)
-    try:
-        path = pathlib.Path(request.file_path)
-        if not _is_safe_path(path):
-            msg = f"Unsafe or out-of-project file path: {request.file_path}"
-            if logger: logger.error(f"[get_snippet] {msg}")
-            return {"status": "error", "message": msg}
-        if not path.exists():
-            msg = f"File does not exist: {request.file_path}"
-            if logger: logger.error(f"[get_snippet] {msg}")
-            return {"status": "error", "message": msg}
-        source = path.read_text(encoding="utf-8")
-        if request.mode in ("function", "class"):
-            if not request.name:
-                return {"status": "error", "message": f"'name' must be provided for mode '{request.mode}'"}
-            try:
-                tree = ast.parse(source, filename=str(path))
-                for node in ast.walk(tree):
-                    if request.mode == "function" and isinstance(node, ast.FunctionDef) and node.name == request.name:
-                        snippet = ast.get_source_segment(source, node)
-                        if snippet:
-                            return {"status": "success", "snippet": snippet, "message": "Function extracted."}
-                        else:
-                            return {"status": "not_found", "message": "Function found but could not extract source."}
-                    if request.mode == "class" and isinstance(node, ast.ClassDef) and node.name == request.name:
-                        snippet = ast.get_source_segment(source, node)
-                        if snippet:
-                            return {"status": "success", "snippet": snippet, "message": "Class extracted."}
-                        else:
-                            return {"status": "not_found", "message": "Class found but could not extract source."}
-                return {"status": "not_found", "message": f"No {request.mode} named '{request.name}' found."}
-            except Exception as e:
-                if logger: logger.error(f"[get_snippet] AST parse error: {e}")
-                return {"status": "error", "message": f"AST parse error: {e}"}
-        elif request.mode == "lines":
-            if request.start_line is None or request.end_line is None:
-                return {"status": "error", "message": "start_line and end_line must be provided for 'lines' mode."}
-            lines = source.splitlines()
-            # 1-indexed, inclusive
-            if request.start_line < 1 or request.end_line > len(lines) or request.start_line > request.end_line:
-                return {"status": "error", "message": "Invalid line range."}
-            snippet = "\n".join(lines[request.start_line - 1:request.end_line])
-            return {"status": "success", "snippet": snippet, "message": "Lines extracted."}
-        else:
-            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
-    except Exception as e:
-        if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
-        return {"status": "error", "message": f"Unexpected error: {e}"}
-
-def introspect(request: IntrospectRequest) -> dict:
-    """
-    Multi-modal code/project introspection multitool for fast, read-only analysis of code and config files.
-
-    This tool provides several sub-tools (modes) for lightweight, high-speed codebase introspection:
-
-    Modes:
-        - 'config':
-            * Reads project configuration files (pyproject.toml or requirements.txt).
-            * Args: config_type ('pyproject' or 'requirements').
-            * Returns: For 'pyproject', the full TOML text. For 'requirements', a list of package strings.
-        - 'outline':
-            * Returns a high-level structural map of a Python file: all top-level functions and classes (with their methods).
-            * Args: file_path (str)
-            * Returns: functions (list), classes (list of {name, methods})
-        - 'stats':
-            * Calculates basic file statistics: total lines, code lines, comment lines, file size in bytes.
-            * Args: file_path (str)
-            * Returns: total_lines (int), code_lines (int), comment_lines (int), file_size_bytes (int)
-        - 'inspect':
-            * Provides details about a single function or class in a file: name, arguments/methods, docstring.
-            * Args: file_path (str), function_name (str, optional), class_name (str, optional)
-            * Returns: type ('function' or 'class'), name, args/methods, docstring
-
-    Args:
-        request (IntrospectRequest):
-            - mode (str): One of 'config', 'outline', 'stats', 'inspect'.
-            - file_path (str, optional): Path to the file for inspection (required for all except config).
-            - config_type (str, optional): 'pyproject' or 'requirements' for config mode.
-            - function_name (str, optional): Name of function to inspect (for 'inspect' mode).
-            - class_name (str, optional): Name of class to inspect (for 'inspect' mode).
-
-    Returns:
-        dict: Structured JSON response. Always includes:
-            - status (str): 'success', 'error', or 'not_found'
-            - message (str): Human-readable status or error message
-        Mode-specific fields:
-            - config: config_type, content (str) or packages (list)
-            - outline: functions (list), classes (list of {name, methods})
-            - stats: total_lines, code_lines, comment_lines, file_size_bytes
-            - inspect: type, name, args/methods, docstring
-
-    Usage Examples:
-        # Get outline of a file
-        {
-            "mode": "outline",
-            "file_path": "/project/src/foo.py"
-        }
-        # Inspect a function
-        {
-            "mode": "inspect",
-            "file_path": "/project/src/foo.py",
-            "function_name": "my_func"
-        }
-        # Get requirements
-        {
-            "mode": "config",
-            "config_type": "requirements"
-        }
-
-    Notes:
-        - All file paths are validated for project safety.
-        - All operations are fast and read-only (no mutation, no heavy analysis).
-        - Returns 'not_found' if the target file, function, or class does not exist.
-    """
-    import pathlib, ast, os, json
-    logger = globals().get('logger', None)
-    try:
-        # --- config mode ---
-        if request.mode == "config":
-            if request.config_type not in ("pyproject", "requirements"):
-                return {"status": "error", "message": "config_type must be 'pyproject' or 'requirements' for config mode."}
-            root = next(iter(PROJECT_ROOTS.values()), None)
-            if not root:
-                return {"status": "error", "message": "No project root found."}
-            if request.config_type == "pyproject":
-                cfg_path = pathlib.Path(root) / "pyproject.toml"
-                if not cfg_path.exists():
-                    return {"status": "not_found", "message": "pyproject.toml not found."}
-                content = cfg_path.read_text(encoding="utf-8")
-                return {"status": "success", "config_type": "pyproject", "content": content}
-            elif request.config_type == "requirements":
-                req_path = pathlib.Path(root) / "requirements.txt"
-                if not req_path.exists():
-                    return {"status": "not_found", "message": "requirements.txt not found."}
-                lines = req_path.read_text(encoding="utf-8").splitlines()
-                pkgs = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
-                return {"status": "success", "config_type": "requirements", "packages": pkgs}
-
-        # --- outline, stats, inspect modes require file_path ---
-        if not request.file_path:
-            return {"status": "error", "message": "file_path must be provided for this mode."}
-        path = pathlib.Path(request.file_path)
-        if not _is_safe_path(path):
-            msg = f"Unsafe or out-of-project file path: {request.file_path}"
-            if logger: logger.error(f"[introspect] {msg}")
-            return {"status": "error", "message": msg}
-        if not path.exists():
-            return {"status": "not_found", "message": f"File does not exist: {request.file_path}"}
-        source = path.read_text(encoding="utf-8")
-
-        # --- outline mode ---
-        if request.mode == "outline":
-            try:
-                tree = ast.parse(source, filename=str(path))
-                functions = []
-                classes = []
-                for node in tree.body:
-                    if isinstance(node, ast.FunctionDef):
-                        functions.append(node.name)
-                    elif isinstance(node, ast.ClassDef):
-                        cls = {"name": node.name, "methods": [n.name for n in node.body if isinstance(n, ast.FunctionDef)]}
-                        classes.append(cls)
-                return {"status": "success", "functions": functions, "classes": classes}
-            except Exception as e:
-                if logger: logger.error(f"[introspect] AST parse error: {e}")
-                return {"status": "error", "message": f"AST parse error: {e}"}
-
-        # --- stats mode ---
-        elif request.mode == "stats":
-            lines = source.splitlines()
-            total_lines = len(lines)
-            comment_lines = sum(1 for l in lines if l.strip().startswith("#"))
-            code_lines = sum(1 for l in lines if l.strip() and not l.strip().startswith("#"))
-            file_size_bytes = os.path.getsize(str(path))
-            return {
-                "status": "success",
-                "total_lines": total_lines,
-                "code_lines": code_lines,
-                "comment_lines": comment_lines,
-                "file_size_bytes": file_size_bytes
-            }
-
-        # --- inspect mode ---
-        elif request.mode == "inspect":
-            if not request.function_name and not request.class_name:
-                return {"status": "error", "message": "Must provide function_name or class_name for inspect mode."}
-            try:
-                tree = ast.parse(source, filename=str(path))
-                # Inspect function
-                if request.function_name:
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.FunctionDef) and node.name == request.function_name:
-                            args = [a.arg for a in node.args.args]
-                            doc = ast.get_docstring(node)
-                            return {
-                                "status": "success",
-                                "type": "function",
-                                "name": node.name,
-                                "args": args,
-                                "docstring": doc
-                            }
-                # Inspect class
-                if request.class_name:
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.ClassDef) and node.name == request.class_name:
-                            doc = ast.get_docstring(node)
-                            methods = [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
-                            return {
-                                "status": "success",
-                                "type": "class",
-                                "name": node.name,
-                                "methods": methods,
-                                "docstring": doc
-                            }
-                return {"status": "not_found", "message": "Requested function/class not found."}
-            except Exception as e:
-                if logger: logger.error(f"[introspect] AST parse error: {e}")
-                return {"status": "error", "message": f"AST parse error: {e}"}
-
-        else:
-            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
-    except Exception as e:
-        if logger: logger.error(f"[introspect] Unexpected error: {e}")
-        return {"status": "error", "message": f"Unexpected error: {e}"}
-
-    import pathlib
-    logger = globals().get('logger', None)
-    try:
-        path = pathlib.Path(request.file_path)
-        if not _is_safe_path(path):
-            msg = f"Unsafe or out-of-project file path: {request.file_path}"
-            if logger: logger.error(f"[get_snippet] {msg}")
-            return {"status": "error", "message": msg}
-        if not path.exists():
-            msg = f"File does not exist: {request.file_path}"
-            if logger: logger.error(f"[get_snippet] {msg}")
-            return {"status": "error", "message": msg}
-        source = path.read_text(encoding="utf-8")
-        if request.mode in ("function", "class"):
-            if not request.name:
-                return {"status": "error", "message": f"'name' must be provided for mode '{request.mode}'"}
-            try:
-                tree = ast.parse(source, filename=str(path))
-                for node in ast.walk(tree):
-                    if request.mode == "function" and isinstance(node, ast.FunctionDef) and node.name == request.name:
-                        snippet = ast.get_source_segment(source, node)
-                        if snippet:
-                            return {"status": "success", "snippet": snippet, "message": "Function extracted."}
-                        else:
-                            return {"status": "not_found", "message": "Function found but could not extract source."}
-                    if request.mode == "class" and isinstance(node, ast.ClassDef) and node.name == request.name:
-                        snippet = ast.get_source_segment(source, node)
-                        if snippet:
-                            return {"status": "success", "snippet": snippet, "message": "Class extracted."}
-                        else:
-                            return {"status": "not_found", "message": "Class found but could not extract source."}
-                return {"status": "not_found", "message": f"No {request.mode} named '{request.name}' found."}
-            except Exception as e:
-                if logger: logger.error(f"[get_snippet] AST parse error: {e}")
-                return {"status": "error", "message": f"AST parse error: {e}"}
-        elif request.mode == "lines":
-            if request.start_line is None or request.end_line is None:
-                return {"status": "error", "message": "start_line and end_line must be provided for 'lines' mode."}
-            lines = source.splitlines()
-            # 1-indexed, inclusive
-            if request.start_line < 1 or request.end_line > len(lines) or request.start_line > request.end_line:
-                return {"status": "error", "message": "Invalid line range."}
-            snippet = "\n".join(lines[request.start_line - 1:request.end_line])
-            return {"status": "success", "snippet": snippet, "message": "Lines extracted."}
-        else:
-            return {"status": "error", "message": f"Invalid mode: {request.mode}."}
-    except Exception as e:
-        if logger: logger.error(f"[get_snippet] Unexpected error: {e}")
-        return {"status": "error", "message": f"Unexpected error: {e}"}
+        return {"status": "error", "message": f"Invalid mode: {request.mode}. Use 'add', 'find', 'remove', or 'update'."}
