@@ -17,46 +17,93 @@ Kinesis Multitools is a robust, extensible MCP server for IDE-integrated code in
 - **Reliable by Design:** All tools run in isolated processes with hard timeouts, preventing hangs and ensuring the server remains responsive.
 - **Incremental Indexing:** Only changed files are re-embedded, making semantic search fast and efficient.
 - **Secure & Sandboxed:** All file operations are validated to ensure they remain within the configured project root.
-- **Extensible:** A development guide (`tooldevguide.md`) provides a blueprint for adding new capabilities.
+ - **Extensible:** A development guide (`tooldevguide.md`) provides a blueprint for adding new capabilities.
 
-## Installation
+## Installation (Windows)
 
-Clone the repository and install dependencies:
+Follow these steps exactly. PyTorch must match your local CUDA and Python versions, and Python 3.13 may require Rust for `libcst`.
 
-```bash
-git clone https://github.com/[your-username]/Kinesis-Multitools.git
-cd Kinesis-Multitools
-pip install -r requirements.txt
+1) Create and activate a virtual environment
+```powershell
+# From project root
+py -3 -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install --upgrade pip setuptools wheel
 ```
 
-**Dependency Note:**
-All required libraries and versions are listed in `requirements.txt`. Key packages include:
-- fastmcp==2.9.2
-- mcp==1.9.4
-- pydantic[email]==2.11.7
-- pydantic-settings==2.5.2
-- ollama==0.5.1
-- fastapi==0.115.9
-- uvicorn[standard]==0.30.6
-- faiss-cpu==1.11.0
-- sentence-transformers==4.1.0
-- jedi==0.19.2
-- chromadb==1.0.5
-- onnxruntime==1.21.1
-- numpy==2.3.1
-- tokenizers==0.21.1
-- pylint==3.2.2
-- mypy==1.16.1
-- bandit==1.8.5
-- vulture==2.11
-- radon==6.0.1
-- libcst==1.2.0
-- rich==14.0.0
-- typer==0.15.2
-- python-dotenv==1.1.0
-- requests==2.32.3
+2) Detect your CUDA version
+```powershell
+nvidia-smi
+# Note the "CUDA Version" shown (e.g., 12.6, 12.8, 13.0)
+# PyTorch provides wheels for specific CUDA toolkits; pick the closest supported (cu118, cu126, cu128)
+```
 
-All dependencies are up-to-date as of July 2025. For GPU support, see the torch install instructions in `requirements.txt`.
+3) Install PyTorch matching your CUDA and Python
+- Visit https://pytorch.org/get-started/previous-versions/ and choose a version that supports your Python (3.12 or 3.13).
+- Common index URLs:
+  - CUDA 11.8 → https://download.pytorch.org/whl/cu118
+  - CUDA 12.6 → https://download.pytorch.org/whl/cu126
+  - CUDA 12.8 → https://download.pytorch.org/whl/cu128
+  - CPU only  → https://download.pytorch.org/whl/cpu
+
+Examples:
+```powershell
+# CUDA 12.8, Python 3.13 example
+python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+
+# CPU-only example
+python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+```
+
+4) Python 3.13 users: install Rust for libcst (or use Python 3.12)
+On Python 3.13, `libcst` often builds from source (no prebuilt wheel) and requires Rust.
+
+Install Rust (PowerShell):
+```powershell
+winget install --id Rustlang.Rustup -e --source winget
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+rustc --version
+```
+If you prefer not to install Rust, recreate the venv with Python 3.12 instead.
+
+5) Install remaining dependencies (exclude torch)
+```powershell
+# Filter out comments and the 'torch' line into a temp file
+Get-Content requirements.txt | Where-Object { $_ -notmatch "^\s*#" -and $_ -notmatch "^\s*torch\b" } | Set-Content requirements.no_torch.txt
+python -m pip install -r requirements.no_torch.txt
+```
+
+6) Configure your MCP client (Windsurf example)
+Add to your `mcp_config.json`:
+```json
+"kinesis_multitools": {
+  "command": "C:\\Projects\\MCP Server\\.venv\\Scripts\\fastmcp.exe",
+  "args": [
+    "run",
+    "C:\\Projects\\MCP Server\\src\\toolz.py",
+    "--transport", "stdio"
+  ],
+  "env": {},
+  "disabled": false
+}
+```
+
+7) Run and verify
+- Launch via your MCP client (e.g., Windsurf). It should start: `fastmcp run src/toolz.py --transport stdio`.
+- Then from your client tools:
+  - Drop anchor (register root):
+    ```json
+    { "tool": "anchor_multitool", "args": { "mode": "drop", "path": "C:\\Projects\\MCP Server", "project_name": "MCP-Server" } }
+    ```
+  - Index project for semantic search:
+    ```json
+    { "tool": "index_project_files", "args": { "project_name": "MCP-Server" } }
+    ```
+
+### Troubleshooting
+- **Torch wheel not found**: Verify Python version and use the correct index URL (cu118/cu126/cu128/cpu). Use the "Previous Versions" page to find a supported combo.
+- **`libcst` build error on Python 3.13**: Install Rust (rustup) or use Python 3.12.
+- **`fastmcp` not found**: Ensure you're using `.venv`'s interpreter: `.\.venv\Scripts\activate`. Reinstall `fastmcp` if needed: `python -m pip install fastmcp`.
 
 ## Windsurf IDE Configuration
 

@@ -21,12 +21,26 @@ onnxruntime==1.21.1
 numpy==2.3.1
 tokenizers==0.21.1
 
-# torch (GPU, CUDA 12.1):
-# DO NOT install via requirements.txt alone.
-# Instead, run:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
-# The line below is for documentation/version tracking only.
-torch==2.5.1+cu121
+###############################
+# IMPORTANT: TORCH INSTALLATION
+###############################
+# DO NOT install torch via this requirements file.
+# Install PyTorch separately so it matches BOTH your local CUDA and Python version.
+# Follow the README section: "Install PyTorch (matching your CUDA)".
+#
+# Reference only (do not install blindly):
+#   Example used on some machines: torch==2.7.1+cu128  (Windows, CUDA 12.8, Python 3.13)
+#   Example from older desktop:    torch==2.5.1+cu121  (Windows, CUDA 12.1, Python 3.12)
+#
+# Choose a version from https://pytorch.org/get-started/previous-versions/ that supports your Python.
+# Use the correct index URL:
+#   CUDA 11.8 -> https://download.pytorch.org/whl/cu118
+#   CUDA 12.6 -> https://download.pytorch.org/whl/cu126
+#   CUDA 12.8 -> https://download.pytorch.org/whl/cu128
+#   CPU only  -> https://download.pytorch.org/whl/cpu
+#
+# Python 3.13 note: libcst currently builds from source (no prebuilt wheel) and requires Rust.
+# Either install Rust (rustup) or use Python 3.12 which has wheels for most libraries.
 
 # Dependencies for /analyze and /edit multitools
 pylint==3.2.2
